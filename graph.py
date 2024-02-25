@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd # type: ignore
-from typing import Tuple, Literal
+from typing import Tuple, Literal, Union
 from scipy.sparse import lil_matrix
 import itertools
 import matplotlib.pyplot as plt
@@ -19,6 +19,7 @@ class MyPopulation:
         self.manufactures_distribution_template = None
         self.schools_distribution_template = None
         self.population = None
+        self.display_status = True
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -368,11 +369,18 @@ class MyPopulation:
 
         return 0
 
-    def polot_manufactures_size_distribution(d: dict):
+    def plot_manufactures_size_distribution(self) -> Literal[0, 1]:
+        """ Функция рисует, как распределены предприятия по размерам """
+
+        if self.display_status:
+            print(datetime.datetime.now(), ": Рисуется распределение домохозяйств по размеру ... ")
+
         fig, ax = plt.subplots()
-        keys, values = list(dist.keys()), list(dist.values())
+        keys, values = list(self.manufactures_sizes_dict.keys()), list(self.manufactures_sizes_dict.values())
+
         # поставить логарифмическую шкалу
         ax.set_xscale('log')
+
         # построить график
         ax.plot(keys, values)
         ax.scatter(keys, values)
@@ -380,9 +388,60 @@ class MyPopulation:
         ax.set_xlabel("Размер предприятия (число сотрудников)")
         ax.set_ylabel("Количество предприятий")
         ax.set_title("Распределение предприятий по размеру")
+        plt.show()
+
+        return 0
+
+    def plot_manufactures_connections_graph(self, manufacture_id: int = -1) -> Literal[0, 1]:
+        """ Функция рисует граф контактов внутри предприятия"""
+        if manufacture_id == -1:
+            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]), 1)[0]
+        else:
+            manufacture_id_inner = manufacture_id
+
+        # получить id людей, которые работают на этом предприятии
+        ind = self.population.query("manufacture_number == @manufacture_id_inner")["id"]
+
+        # создать граф
+        tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+        np.fill_diagonal(tmp, 0)
+        graph = nx.DiGraph(tmp)
+        pos = nx.circular_layout(graph)
+
+        nx.draw(G=graph, pos=pos)
+        plt.show()
+        return 0
+
+    def plot_manufactures_connections_hist(self, manufacture_id: int = -1) -> Literal[0, 1]:
+        """ Функция рисует граф степеней вершин графа контактов внутри предприятия"""
+        if manufacture_id == -1:
+            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]), 1)[0]
+        else:
+            manufacture_id_inner = manufacture_id
+
+        # получить id людей, которые работают на этом предприятии
+        ind = self.population.query("manufacture_number == @manufacture_id_inner")["id"]
+
+        # создать граф
+        tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+        np.fill_diagonal(tmp, 0)
+        graph = nx.DiGraph(tmp)
+
+        hist = nx.degree_histogram(graph)
+
+        # Рисуем гистограмму
+        plt.bar(range(len(hist)), hist, width=0.8, color='b')
+        plt.xlabel('Степень вершины')
+        plt.ylabel('Число вершин')
+        plt.title('Гистограмма степеней вершин')
+        plt.show()
+
+        return 0
+
     def _create_connections_inside_manufactures(self,
                                                 largest_manufactures_number: int,
-                                                weight: int = 20) -> int:
+                                                weight: int = 20,
+                                                betta: float = 0.3) -> int:
 
         # определить число людей работоспособного возраста
         number_of_workers = self.population.query("age > 18").shape[0]
@@ -393,20 +452,57 @@ class MyPopulation:
         order = int(np.floor(np.log10(number_of_workers)))
 
         a = np.power(10, np.arange(order))[::-1]
-        m = int((number_of_workers - a @ np.ones(a.size) * largest_manufactures_number) // (a @ np.arange(a.size)))
-        manufactures_sizes_series = pd.Series(
-            np.repeat(a, m * np.arange(a.size) + largest_manufactures_number)).value_counts()
-        manufactures_sizes_dict = manufactures_sizes_series.to_dict()
 
-        for manufacture_size in manufactures_sizes_dict.keys():
-            for j in range(manufactures_sizes_dict[manufacture_size]):
+        m = int((number_of_workers - a @ np.ones(a.size) * largest_manufactures_number) // (a @ np.arange(a.size)))
+        if m <= 0:
+            raise Exception
+
+        self.manufactures_sizes_series = pd.Series(
+            np.repeat(a, m * np.arange(a.size) + largest_manufactures_number)).value_counts()
+        self.manufactures_sizes_dict = self.manufactures_sizes_series.to_dict()
+
+        for manufacture_size in self.manufactures_sizes_dict.keys():
+            for j in range(self.manufactures_sizes_dict[manufacture_size]):
+
+                # выбрать людей трудоспособного возраста, за которыми не закреплено предприятие
                 ind = self.population.query("(age >= 19) & (manufacture_number == -1)")["id"]
+
+                # выбрать людей, которых закрепим за текущим предприятием
                 workers = np.random.choice(ind, manufacture_size, replace=False)
                 if not len(workers):
                     continue
 
                 # закрепить за этими людьми номер предприятие
                 self.population.loc[workers, "manufacture_number"] = j * manufacture_size
+
+                # создать связи между людьми по схеме small-world
+                number_of_nodes = len(workers)
+                # сделать так, чтобы изначально все workers стоят по кругу и соединены только с соседом
+                for i in range(len(workers) - 1):
+                    self.connections_matrix[workers[i], workers[i + 1]] = 1
+                    self.connections_matrix[workers[i + 1], workers[i]] = 1
+                self.connections_matrix[workers[0], workers[-1]] = 1
+                self.connections_matrix[workers[-1], workers[0]] = 1
+
+                number_of_ripped_edges = int(number_of_nodes * betta)
+                index = np.random.choice(workers, number_of_ripped_edges, replace=False)
+                for i in index:
+                    if i != workers.size - 1:
+                        # разорвать связь
+                        self.connections_matrix[i, i + 1] = 0
+                        self.connections_matrix[i + 1, i] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(workers[workers != i], 1, replace=False)[0]
+                        self.connections_matrix[i, new_node] = 1
+                        self.connections_matrix[new_node, i] = 1
+                    else:
+                        # разорвать связь
+                        self.connections_matrix[0, 0 + 1] = 0
+                        self.connections_matrix[0 + 1, 0] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(workers[workers != 0], 1, replace=False)[0]
+                        self.connections_matrix[0, new_node] = 1
+                        self.connections_matrix[new_node, 0] = 1
 
 
         return 0
