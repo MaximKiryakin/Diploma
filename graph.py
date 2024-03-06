@@ -149,7 +149,7 @@ class MyPopulation:
     def _get_household_ratio(self) -> int:
 
         tmp = self.households_distribution_template[["region_type", "1_person", "2_persons",
-                                                "3_persons",	"4_persons", "5_persons", "6+_persons"]] \
+                                                     "3_persons", "4_persons", "5_persons", "6+_persons"]] \
                 .groupby("region_type").sum()
 
         urban = tmp.loc['Городские населенные пункты', :].to_numpy()
@@ -412,10 +412,39 @@ class MyPopulation:
         plt.show()
         return 0
 
+
+    def plot_total_connections_hist(self) -> Literal[0, 1]:
+        """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
+
+        # получить id людей, которые работают на предприятиях
+        ind = self.population.query("manufacture_number != -1")["id"]
+
+        # создать граф
+        tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+
+        # исключить контакты людей самих с собой
+        np.fill_diagonal(tmp, 0)
+
+        print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
+        graph = nx.DiGraph(tmp)
+        hist = nx.degree_histogram(graph)
+
+        # нарисовать гистограмму
+        plt.bar(range(len(hist)), hist, width=0.8, color='b')
+        plt.xlabel('Степень вершины')
+        plt.ylabel('Число вершин')
+        plt.title('Гистограмма степеней вершин популяции')
+        plt.show()
+
+        return 0
+
+
     def plot_manufactures_connections_hist(self, manufacture_id: int = -1) -> Literal[0, 1]:
         """ Функция рисует граф степеней вершин графа контактов внутри предприятия"""
+        # выбрать номер предприятия, но не учитывать людей без предприятия (номер -1)
         if manufacture_id == -1:
-            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]), 1)[0]
+            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]\
+                                                             [self.population["manufacture_number"] != -1]), 1)[0]
         else:
             manufacture_id_inner = manufacture_id
 
@@ -432,8 +461,8 @@ class MyPopulation:
         # Рисуем гистограмму
         plt.bar(range(len(hist)), hist, width=0.8, color='b')
         plt.xlabel('Степень вершины')
-        plt.ylabel('Число вершин')
-        plt.title('Гистограмма степеней вершин')
+        plt.ylabel('Число вершинy')
+        plt.title('Гистограмма степеней вершин для предприятия ' + str(manufacture_id_inner))
         plt.show()
 
         return 0

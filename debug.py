@@ -21,5 +21,6 @@ p = gr.MyPopulation()
 p.create_population("urban",50000 )
 #p.plot_graph()
 #p.plot_manufactures_size_distribution()
-p.plot_manufactures_connections_hist()
+#p.plot_manufactures_connections_hist()
+p.plot_total_connections_hist()
 
