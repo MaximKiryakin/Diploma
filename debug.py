@@ -18,8 +18,9 @@ gr.create_population(households_distribution_template=households,
                      schools_distribution_template=schools)
 """
 p = gr.MyPopulation()
-p.create_population("urban",50000 )
+p.create_population("urban",20000, largest_manufactures_number=12)
 #p.plot_graph()
+#p.plot_heat_map()
 #p.plot_manufactures_size_distribution()
 #p.plot_manufactures_connections_hist()
 p.plot_total_connections_hist()

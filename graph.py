@@ -1,25 +1,36 @@
 import numpy as np
-import pandas as pd # type: ignore
+import pandas as pd  # type: ignore
 from typing import Tuple, Literal, Union
 from scipy.sparse import lil_matrix
 import itertools
 import matplotlib.pyplot as plt
+import seaborn as sns
+plt.style.use('ggplot')
 import networkx as nx
 import datetime
 from scipy.interpolate import interp1d
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 from dataclasses import dataclass
+
+from scipy import stats
+
+
+
 
 @dataclass
 class MyPopulation:
 
-    def __init__(self):
+    def __init__(self, random_seed = 42):
         self.households_distribution_template = None
         self.age_sex_distribution_template = None
         self.manufactures_distribution_template = None
         self.schools_distribution_template = None
-        self.population = None
+        self.population = None                  # в этот атрибут записывается результат метода create_population
+        self.population_total = None            # в этот атрибут записывается результат метода generate_total_population
+        self.population_total_grouped = None    # это сгруппированная популяция population_total для графиков
         self.display_status = True
+        self.random_seed = random_seed
+        np.random.seed(self.random_seed)
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -51,6 +62,239 @@ class MyPopulation:
         self.households_distribution_template = households_distribution_template
 
         return 0
+
+
+    def plot_households_distribution(self) -> int:
+
+        households_grouped = self.households_distribution_template[["region_type", "1_person", "2_persons",
+                                                                    "3_persons", "4_persons", "5_persons",
+                                                                    "6+_persons"]] \
+                                 .groupby("region_type") \
+                                 .sum() \
+                                 .reset_index()
+
+        plt.figure(figsize=(20, 10))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 8))
+
+        axs[0].set_ylim(0, 4.5 * 10 ** 7)
+        axs[1].set_ylim(0, 4.5 * 10 ** 7)
+
+        df_melted_urban = households_grouped \
+            .query("region_type == 'Городские населенные пункты'")[["1_person", "2_persons", "3_persons",
+                                                                    "4_persons", "5_persons", "6+_persons"]] \
+            .rename(columns={"1_person": "1 человек",
+                             "2_persons": "2 человека",
+                             "3_persons": "3 человека",
+                             "4_persons": "4 человека",
+                             "5_persons": "5 человек",
+                             "6+_persons": "Более 6 человек"}) \
+            .melt()
+
+        df_melted_rural = households_grouped \
+            .query("region_type == 'Сельские населенные пункты'")[["1_person", "2_persons", "3_persons",
+                                                                   "4_persons", "5_persons", "6+_persons"]] \
+            .rename(columns={"1_person": "1 человек",
+                             "2_persons": "2 человека",
+                             "3_persons": "3 человека",
+                             "4_persons": "4 человека",
+                             "5_persons": "5 человек",
+                             "6+_persons": "Более 6 человек"}) \
+            .melt()
+
+        sns.barplot(x='variable', y='value', data=df_melted_rural, ax=axs[1])
+        sns.barplot(x='variable', y='value', data=df_melted_urban, ax=axs[0])
+
+        axs[0].set_title("Городское население")
+        axs[0].set_xlabel("Число людей в семье")
+        axs[0].set_ylabel("Количество семей")
+
+        axs[1].set_title("Сельское население")
+        axs[1].set_xlabel("Число людей в семье")
+        axs[1].set_ylabel("Количество семей")
+
+        return 0
+
+
+    def generate_total_population(self,
+                                  population_size: int) -> int:
+
+        """ Метод создает популяцию городскую + сельскую """
+        print(datetime.datetime.now(), ": Строится популяция для городского населения ... ")
+        self.create_population(population_type="urban",
+                               population_size=(population_size // 2),
+                               largest_manufactures_number=12)
+
+        urban_population_raw = self.population.copy()
+        urban_population = self.population.groupby(["age_group", "sex", "population_type"],
+                                                   as_index=False).count()
+
+        print(datetime.datetime.now(), ": Строится популяция для сельского населения ... ")
+        self.create_population(population_type="rural",
+                               population_size=(population_size // 2),
+                               largest_manufactures_number=12)
+
+        rural_population_raw = self.population.copy()
+        rural_population = self.population.groupby(["age_group", "sex", "population_type"],
+                                                   as_index=False).count()
+
+        self.population_total = pd.concat([urban_population_raw, rural_population_raw])
+
+        population_predicted = urban_population.query("sex == 'man'")[["age_group", "id"]] \
+            .rename(columns={"id": "men_urban"}) \
+            .merge(urban_population.query("sex == 'woman'")[["age_group", "id"]] \
+                   .rename(columns={"id": "women_urban"}),
+                   on="age_group", how="left") \
+            .merge(rural_population.query("sex == 'woman'")[["age_group", "id"]] \
+                   .rename(columns={"id": "women_rural"}),
+                   on="age_group", how="left") \
+            .merge(rural_population.query("sex == 'man'")[["age_group", "id"]] \
+                   .rename(columns={"id": "men_rural"}),
+                   on="age_group", how="left")
+
+        population_predicted = population_predicted.set_index("age_group")
+        population_predicted = population_predicted.loc[
+                               ['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24', '25 – 29', '30 – 34',
+                                '35 – 39', '40 – 44', '45 – 49', '50 – 54', '55 – 59',
+                                '60 – 64', '65 – 69', '70 лет и более'], :].reset_index()
+
+        self.population_total_grouped = population_predicted
+        return 0
+
+
+    def plot_households_distribution_generated_population(self,
+                                                          population_size: int) -> int:
+        """ Метод рисует распределение по домохозяйствам для сгенерированной популяции"""
+        if self.population_total is None:
+            self.generate_total_population(population_size=population_size)
+
+        tmp = self.population_total.query("population_type == 'urban'").groupby("household_id").count().groupby(
+            "id").count().reset_index()[["id", "age"]].head(6).transpose()
+        tmp.columns = tmp.loc["id", :]
+        tmp = tmp.tail(1)
+        tmp_urban = tmp.melt()
+
+        tmp = self.population_total.query("population_type == 'rural'").groupby("household_id").count().groupby(
+            "id").count().reset_index()[["id", "age"]].head(6).transpose()
+        tmp.columns = tmp.loc["id", :]
+        tmp = tmp.tail(1)
+        tmp_rural = tmp.melt()
+
+
+        plt.figure(figsize=(20, 10))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 8))
+        plt.style.use('ggplot')
+
+        axs[0].set_ylim(0, 5000)
+        axs[1].set_ylim(0, 5000)
+
+        sns.barplot(x='id', y='value', data=tmp_rural, ax=axs[1])
+        sns.barplot(x='id', y='value', data=tmp_urban, ax=axs[0])
+
+        axs[0].set_title("Городское население")
+        axs[0].set_xlabel("Число людей в семье")
+        axs[0].set_ylabel("Количество семей")
+
+        axs[1].set_title("Сельское население")
+        axs[1].set_xlabel("Число людей в семье")
+        axs[1].set_ylabel("Количество семей")
+
+        return 0
+
+    def plot_age_sex_distribution(self,
+                                  max_xlimit: int,
+                                  population_size: int,
+                                  use_generated_population: bool = False,
+                                  age_sex_distribution_filename: str = "age_sex_distribution_percentage.xlsx") -> int:
+        """ Внимание: этот метод меняет атрибут population !!!"""
+
+        # 1 Подготовка данных
+        # различаются случаи, когда надо построить популяцию по фактическим данным и когда надо
+        # сгенерировать популяцию на основе шаблона
+        if not use_generated_population:
+
+            print(datetime.datetime.now(), ": Выполняется отрисовка возрастных пирамид для фактических данных ... ")
+            self.read_age_sex_distribution_template(file_name=age_sex_distribution_filename)
+            age_sex_distribution_template_inner = self.age_sex_distribution_template.copy()
+
+            # 1.2 сгруппировать данные по возрастным группам
+            age_sex_distribution_template_inner = \
+                age_sex_distribution_template_inner[["men_women_total", "men_total", "women_total", "men_women_urban",
+                                                     "men_urban", "women_urban", "men_women_rural", "men_rural",
+                                                     "women_rural", "age_group"]] \
+                .groupby("age_group") \
+                .sum() \
+                .loc[['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24', '25 – 29', '30 – 34',
+                      '35 – 39', '40 – 44', '45 – 49', '50 – 54', '55 – 59',
+                      '60 – 64', '65 – 69', '70 лет и более'], :] \
+                .reset_index()
+
+            # 1.3 рассчитать число людей каждой группы исходя из размера популяции
+            age_sex_distribution_template_inner[["men_women_total", "men_total", "women_total", "men_women_urban",
+                                                 "men_urban", "women_urban", "men_women_rural", "men_rural",
+                                                 "women_rural"]] *= (population_size // 4)
+
+            age_sex_distribution_template_inner \
+                .loc[age_sex_distribution_template_inner.age_group == "70 лет и более", "age_group"] \
+                    = "70 лет \n и более"
+        else:
+            print(datetime.datetime.now(),
+                  ": Выполняется отрисовка возрастных пирамид для сгенерированной популяции ... ")
+
+            if self.population_total_grouped is None:
+                self.generate_total_population(population_size=population_size)
+
+            age_sex_distribution_template_inner = self.population_total_grouped
+
+        # 2. Отрисовка графика
+        plt.figure(figsize=(20, 10))
+        fig, axs = plt.subplots(1, 2, figsize=(22, 8))
+
+        axs[0].set_xlim(-max_xlimit, max_xlimit)
+        axs[1].set_xlim(-max_xlimit, max_xlimit)
+
+        AgeClass = age_sex_distribution_template_inner["age_group"]
+
+        sns.barplot(x=-1 * age_sex_distribution_template_inner.men_urban, y="age_group",
+                    data=age_sex_distribution_template_inner,
+                    order=AgeClass, color="red", label="мужчины", ax=axs[0])
+
+        sns.barplot(x=age_sex_distribution_template_inner.women_urban, y="age_group",
+                    data=age_sex_distribution_template_inner,
+                    order=AgeClass, color="blue", label="женщины", ax=axs[0])
+
+        sns.barplot(x=-1 * age_sex_distribution_template_inner.men_rural, y="age_group",
+                    data=age_sex_distribution_template_inner,
+                    order=AgeClass, color="red", label="мужчины", ax=axs[1])
+
+        sns.barplot(x=age_sex_distribution_template_inner.women_rural, y="age_group",
+                    data=age_sex_distribution_template_inner,
+                    order=AgeClass, color="blue", label="женщины", ax=axs[1])
+
+        axs[0].set_title("Городское население")
+        axs[0].set_xlabel("Численность")
+        axs[0].set_ylabel("Возрастная группа")
+
+        axs[1].set_title("Сельское население")
+        axs[1].set_xlabel("Численность")
+        axs[1].set_ylabel("Возрастная группа")
+
+        axs[0].axvline(0, 1, 0, color="black")
+        axs[0].legend(prop={'size': 15})
+
+        axs[1].axvline(0, 1, 0, color="black")
+        axs[1].legend(prop={'size': 15})
+
+        def abs_fmt(x, pos):
+            """Функция форматирования для модуля"""
+            return f'{int(abs(x))}'
+
+        from matplotlib.ticker import FuncFormatter
+        for ax in axs.flatten():
+            ax.xaxis.set_major_formatter(FuncFormatter(abs_fmt))
+
+        return 0
+
+
 
     def read_age_sex_distribution_template(self, file_name: str,
                                            input_folder: str = "") -> int:
@@ -150,7 +394,7 @@ class MyPopulation:
 
         tmp = self.households_distribution_template[["region_type", "1_person", "2_persons",
                                                      "3_persons", "4_persons", "5_persons", "6+_persons"]] \
-                .groupby("region_type").sum()
+            .groupby("region_type").sum()
 
         urban = tmp.loc['Городские населенные пункты', :].to_numpy()
         rural = tmp.loc['Сельские населенные пункты', :].to_numpy()
@@ -163,16 +407,15 @@ class MyPopulation:
         self.household_ratio_rural = rural
         return 0
 
-
     def _create_population_from_data(self, population_type: Literal["men", "women"],
                                      distribution_template: pd.DataFrame) -> pd.DataFrame:
 
         population = distribution_template[["age", population_type]]
 
         population = population.loc[np.repeat(population.index, population[population_type])] \
-                               .reset_index(drop=True) \
-                               .reset_index() \
-                               .drop(columns=[population_type])
+            .reset_index(drop=True) \
+            .reset_index() \
+            .drop(columns=[population_type])
 
         population["sex"] = "man" if population_type == "men" else "woman"
         population["household_id"] = np.nan
@@ -184,10 +427,6 @@ class MyPopulation:
         population = population[["system_record_number", "age", "sex", "id_in_sex_group", "household_id"]]
 
         return population
-
-
-
-
 
     def _form_household(self, number_of_children: int,
                         population_inner: pd.DataFrame,
@@ -205,23 +444,23 @@ class MyPopulation:
         elder_then_18_index = _find_young_index(population_inner["age"].to_numpy())
 
         household_parents = population_inner.loc[elder_then_18_index:, :] \
-                                            .iloc[:(household_size - 1) * number_of_parents
-                                                  if household_size % 2 == 1
-                                                  else household_size * number_of_parents, :]
+                                .iloc[:(household_size - 1) * number_of_parents
+        if household_size % 2 == 1
+        else household_size * number_of_parents, :]
 
         household_parents["household_id"] = np.arange(household_parents.shape[0] // number_of_parents) \
-                                              .repeat(number_of_parents)
+            .repeat(number_of_parents)
 
         if number_of_children:
             household_parents["role"] = "parent"
 
             # раньше детей выбирал так, но терялась одна возрастная категория, из-за того что есть дисбаланс
             # по полу в возрастных категориях
-            #household_children = population_inner.loc[:elder_then_18_index, :] \
+            # household_children = population_inner.loc[:elder_then_18_index, :] \
             #                                     .iloc[:(household_size - 1) * number_of_children
             #                                           if household_size % 2 == 1
             #                                           else household_size * number_of_children, :]
-            #students = np.random.choice(ind, min(average_class_size, ind.size), replace=False)
+            # students = np.random.choice(ind, min(average_class_size, ind.size), replace=False)
 
             subset = np.random.choice(np.arange(elder_then_18_index),
                                       (household_size - 1) * number_of_children
@@ -230,25 +469,24 @@ class MyPopulation:
                                       replace=False)
 
             household_children = population_inner.loc[:elder_then_18_index, :] \
-                                                 .iloc[subset, :]
+                                     .iloc[subset, :]
 
             household_children["household_id"] = np.arange(household_children.shape[0] // number_of_children) \
-                                                   .repeat(number_of_children)
+                .repeat(number_of_children)
 
             household_children["role"] = "child"
-            household = pd.concat([household_parents, household_children]).sort_values("household_id").reset_index(drop=True)
+            household = pd.concat([household_parents, household_children]).sort_values("household_id").reset_index(
+                drop=True)
         else:
             household_parents["role"] = "no children"
             household = household_parents
 
         # удалить из основной популяции образовавшиеся семьи
-        _population_inner = _population_inner[~_population_inner["system_record_number"]\
-                                              .isin(household["system_record_number"])]\
-                            .reset_index(drop=True)
-
+        _population_inner = _population_inner[~_population_inner["system_record_number"] \
+            .isin(household["system_record_number"])] \
+            .reset_index(drop=True)
 
         return _population_inner, household
-
 
     def _create_connections_in_population(self,
                                           households_number: pd.Series) -> int:
@@ -257,39 +495,39 @@ class MyPopulation:
 
         # 1.1 сформировать семьи из 2х человек
         population_inner, two_p = self._form_household(number_of_children=0,
-                                                  population_inner=population_inner,
-                                                  household_size=households_number["2_persons"],
-                                                  number_of_parents=2)
+                                                       population_inner=population_inner,
+                                                       household_size=households_number["2_persons"],
+                                                       number_of_parents=2)
 
         # 1.2 сформировать семьи из 3х человек
         population_inner, three_p = self._form_household(number_of_children=1,
-                                                    population_inner=population_inner,
-                                                    household_size=households_number["3_persons"],
-                                                    number_of_parents=2)
+                                                         population_inner=population_inner,
+                                                         household_size=households_number["3_persons"],
+                                                         number_of_parents=2)
 
         # 1.3 сформировать семьи из 4х человек
         population_inner, four_p = self._form_household(number_of_children=2,
-                                                   population_inner=population_inner,
-                                                   household_size=households_number["4_persons"],
-                                                   number_of_parents=2)
+                                                        population_inner=population_inner,
+                                                        household_size=households_number["4_persons"],
+                                                        number_of_parents=2)
 
         # 1.4 сформировать семьи из 5 человек
         population_inner, five_p = self._form_household(number_of_children=3,
-                                                   population_inner=population_inner,
-                                                   household_size=households_number["5_persons"],
-                                                   number_of_parents=2)
+                                                        population_inner=population_inner,
+                                                        household_size=households_number["5_persons"],
+                                                        number_of_parents=2)
 
         # 1.5 сформировать семьи из 6 человек
         population_inner, six_p = self._form_household(number_of_children=4,
-                                                  population_inner=population_inner,
-                                                  household_size=households_number["6+_persons"],
-                                                  number_of_parents=2)
+                                                       population_inner=population_inner,
+                                                       household_size=households_number["6+_persons"],
+                                                       number_of_parents=2)
 
         # 1.5 сформировать семьи из 1 человека
         population_inner, one_p = self._form_household(number_of_children=0,
-                                                  population_inner=population_inner,
-                                                  household_size=households_number["1_person"],
-                                                  number_of_parents=1)
+                                                       population_inner=population_inner,
+                                                       household_size=households_number["1_person"],
+                                                       number_of_parents=1)
 
         # 1.6 сделать номера домохозяйств уникальными
         two_p["household_id"] = two_p["household_id"] + one_p["household_id"].max()
@@ -299,12 +537,11 @@ class MyPopulation:
         six_p["household_id"] = six_p["household_id"] + five_p["household_id"].max()
 
         # 2 сформировать итоговую популяцию
-        population = pd.concat([one_p, two_p, three_p, four_p, five_p, six_p]).reset_index(drop=True).reset_index()\
-                       .rename(columns={"index": "id"})
+        population = pd.concat([one_p, two_p, three_p, four_p, five_p, six_p]).reset_index(drop=True).reset_index() \
+            .rename(columns={"index": "id"})
 
         self.population = population
         return 0
-
 
     def _create_contacts_inside_households(self,
                                            weight: int = 1) -> int:
@@ -346,7 +583,7 @@ class MyPopulation:
 
         average_class_size = int(average_school_size // 11)
 
-        number_of_schools = int(self.population.query("age <= 18").shape[0]*0.75 / average_school_size)
+        number_of_schools = int(self.population.query("age <= 18").shape[0] * 0.75 / average_school_size)
 
         population_inner = self.population.copy()
         population_inner["school_number"] = -1
@@ -394,6 +631,9 @@ class MyPopulation:
 
     def plot_manufactures_connections_graph(self, manufacture_id: int = -1) -> Literal[0, 1]:
         """ Функция рисует граф контактов внутри предприятия"""
+
+        np.random.seed(self.random_seed)
+
         if manufacture_id == -1:
             manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]), 1)[0]
         else:
@@ -410,14 +650,15 @@ class MyPopulation:
 
         nx.draw(G=graph, pos=pos)
         plt.show()
+
         return 0
 
-
-    def plot_total_connections_hist(self) -> Literal[0, 1]:
+    def plot_total_connections_hist(self,
+                                    bins: int = 15) -> Literal[0, 1]:
         """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
 
         # получить id людей, которые работают на предприятиях
-        ind = self.population.query("manufacture_number != -1")["id"]
+        ind = self.population_total.query("manufacture_number != -1")["id"]
 
         # создать граф
         tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
@@ -430,7 +671,8 @@ class MyPopulation:
         hist = nx.degree_histogram(graph)
 
         # нарисовать гистограмму
-        plt.bar(range(len(hist)), hist, width=0.8, color='b')
+        x = np.repeat(range(len(hist)), hist)
+        plt.hist(x, bins=bins)
         plt.xlabel('Степень вершины')
         plt.ylabel('Число вершин')
         plt.title('Гистограмма степеней вершин популяции')
@@ -438,13 +680,14 @@ class MyPopulation:
 
         return 0
 
-
     def plot_manufactures_connections_hist(self, manufacture_id: int = -1) -> Literal[0, 1]:
         """ Функция рисует граф степеней вершин графа контактов внутри предприятия"""
+
+        np.random.seed(self.random_seed)
         # выбрать номер предприятия, но не учитывать людей без предприятия (номер -1)
         if manufacture_id == -1:
-            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]\
-                                                             [self.population["manufacture_number"] != -1]), 1)[0]
+            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"] \
+                                                                 [self.population["manufacture_number"] != -1]), 1)[0]
         else:
             manufacture_id_inner = manufacture_id
 
@@ -484,6 +727,7 @@ class MyPopulation:
 
         m = int((number_of_workers - a @ np.ones(a.size) * largest_manufactures_number) // (a @ np.arange(a.size)))
         if m <= 0:
+            print(m)
             raise Exception
 
         self.manufactures_sizes_series = pd.Series(
@@ -533,9 +777,7 @@ class MyPopulation:
                         self.connections_matrix[0, new_node] = 1
                         self.connections_matrix[new_node, 0] = 1
 
-
         return 0
-
 
     def _create_random_connections(self,
                                    power: float,
@@ -546,12 +788,11 @@ class MyPopulation:
 
         return 0
 
-
     def plot_graph(self,
                    display_status: bool = True) -> int:
         """ Функция рисует граф по матрице контактов """
 
-        #plt.figure(facecolor='beige')
+        # plt.figure(facecolor='beige')
         plt.rcParams['axes.facecolor'] = 'black'
 
         if display_status:
@@ -567,8 +808,7 @@ class MyPopulation:
         if display_status:
             print(datetime.datetime.now(), ": Выполняется отрисовка построенного графа ... ")
 
-        nx.draw(G=graph, node_size=10, arrows=False, with_labels=False, width=2.0, alpha=0.2,
-                edge_color=[color_map[graph[u][v]['weight']] for u, v in graph.edges()])
+        nx.draw(G=graph, node_size=10, arrows=False, with_labels=False, width=2.0, alpha=0.2)
 
         # Создание легенды
         plt.legend(handles=[plt.Line2D([0], [0], marker='o', color='w',
@@ -585,7 +825,6 @@ class MyPopulation:
         plt.show()
 
         return 0
-
 
     def plot_minimum_spanning_tree(self,
                                    display_status: bool = True) -> int:
@@ -608,13 +847,12 @@ class MyPopulation:
         plt.show()
         return 0
 
-
     def plot_heat_map(self) -> int:
         """ Функция рисует тепловую карту матрицы контактов """
-        plt.imshow(self.connections_matrix.toarray())
+        plt.imshow(self.connections_matrix.toarray(), cmap="hot", interpolation="nearest")
+        plt.colorbar()
         plt.show()
         return 0
-
 
     def _create_connection_inside_university(self,
                                              average_university_size: int,
@@ -622,8 +860,8 @@ class MyPopulation:
                                              weight: int = 30) -> int:
 
         average_group_size = int(average_university_size // average_number_of_groups)
-        number_of_universities = int(self.population.query("(age > 18) & (age < 27)").shape[0] / average_university_size)
-
+        number_of_universities = int(
+            self.population.query("(age > 18) & (age < 27)").shape[0] / average_university_size)
 
         self.population["university_number"] = -1
 
@@ -641,22 +879,25 @@ class MyPopulation:
                 self.population.loc[students, "university_number"] = i
 
                 self._add_connections_to_matrix(nodes=students,
-                                                    weight=weight)
+                                                weight=weight)
 
         return 0
 
-
     def create_population(self,
                           population_type: Literal["urban", "rural"],
-                          population_size: int) -> int:
+                          population_size: int,
+                          largest_manufactures_number: int = 20,
+                          households_filename: str = "households.xlsx",
+                          age_sex_distribution_filename: str = "age_sex_distribution_percentage.xlsx",
+                          manufactures_filename: str = "manufactures.xlsx",
+                          schools_filename: str = "schools.xlsx") -> int:
 
         print(datetime.datetime.now(), ": Запуск функции создания популяции ... ")
 
-        self.read_households_distribution_template(file_name="households.xlsx")
-        self.read_age_sex_distribution_template(file_name="age_sex_distribution_percentage.xlsx")
-        self.read_manufactures_distribution_template(file_name="manufactures.xlsx")
-        self.read_schools_distribution_template(file_name="schools.xlsx")
-
+        self.read_households_distribution_template(file_name=households_filename)
+        self.read_age_sex_distribution_template(file_name=age_sex_distribution_filename)
+        self.read_manufactures_distribution_template(file_name=manufactures_filename)
+        self.read_schools_distribution_template(file_name=schools_filename)
 
         # посчитать, сколько человек надо на каждый тип домохозяйства
         self._get_household_ratio()
@@ -674,11 +915,11 @@ class MyPopulation:
 
         # 1.1 найти число людей для каждой возрастной группы
         base = self.age_sex_distribution_template[["age", "men" + "_" + population_type,
-                                              "women" + "_" + population_type]] \
-               .rename(
-                   columns={"men" + "_" + population_type: "men",
-                            "women" + "_" + population_type: "women"}
-               )
+                                                   "women" + "_" + population_type]] \
+            .rename(
+            columns={"men" + "_" + population_type: "men",
+                     "women" + "_" + population_type: "women"}
+        )
 
         # 1.2 считаем что мужчин и женщин равное количество в популяции
         # определяем, сколько человек в каждой возрастной категории
@@ -696,30 +937,32 @@ class MyPopulation:
         self.population = pd.concat([men, women]).reset_index(drop=True)
 
         self.population["age_group"] = np.select([(self.population.age >= 0) & (self.population.age <= 4),
-                                             (self.population.age >= 5) & (self.population.age <= 9),
-                                             (self.population.age >= 10) & (self.population.age <= 14),
-                                             (self.population.age >= 15) & (self.population.age <= 19),
-                                             (self.population.age >= 20) & (self.population.age <= 24),
-                                             (self.population.age >= 25) & (self.population.age <= 29),
-                                             (self.population.age >= 30) & (self.population.age <= 34),
-                                             (self.population.age >= 35) & (self.population.age <= 39),
-                                             (self.population.age >= 40) & (self.population.age <= 44),
-                                             (self.population.age >= 45) & (self.population.age <= 49),
-                                             (self.population.age >= 50) & (self.population.age <= 54),
-                                             (self.population.age >= 55) & (self.population.age <= 59),
-                                             (self.population.age >= 60) & (self.population.age <= 64),
-                                             (self.population.age >= 65) & (self.population.age <= 69),
-                                             (self.population.age >= 70)],
-                                    ['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24', '25 – 29', '30 – 34',
-                                             '35 – 39', '40 – 44', '45 – 49', '50 – 54', '55 – 59', '60 – 64', '65 – 69',
-                                             '70 лет и более'])
+                                                  (self.population.age >= 5) & (self.population.age <= 9),
+                                                  (self.population.age >= 10) & (self.population.age <= 14),
+                                                  (self.population.age >= 15) & (self.population.age <= 19),
+                                                  (self.population.age >= 20) & (self.population.age <= 24),
+                                                  (self.population.age >= 25) & (self.population.age <= 29),
+                                                  (self.population.age >= 30) & (self.population.age <= 34),
+                                                  (self.population.age >= 35) & (self.population.age <= 39),
+                                                  (self.population.age >= 40) & (self.population.age <= 44),
+                                                  (self.population.age >= 45) & (self.population.age <= 49),
+                                                  (self.population.age >= 50) & (self.population.age <= 54),
+                                                  (self.population.age >= 55) & (self.population.age <= 59),
+                                                  (self.population.age >= 60) & (self.population.age <= 64),
+                                                  (self.population.age >= 65) & (self.population.age <= 69),
+                                                  (self.population.age >= 70)],
+                                                 ['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24', '25 – 29',
+                                                  '30 – 34',
+                                                  '35 – 39', '40 – 44', '45 – 49', '50 – 54', '55 – 59', '60 – 64',
+                                                  '65 – 69',
+                                                  '70 лет и более'])
 
         # 2.1 разбить полученную популяцию на домохозяйства
         print(datetime.datetime.now(), ": Формирование домохозяйств ... ")
         self._create_connections_in_population(households_number=pd.Series(data=households_number.astype("int"),
-                                                                                   index=['1_person', '2_persons',
-                                                                                          '3_persons', '4_persons',
-                                                                                          '5_persons', '6+_persons']))
+                                                                           index=['1_person', '2_persons',
+                                                                                  '3_persons', '4_persons',
+                                                                                  '5_persons', '6+_persons']))
 
         # 3 создать матрицу контактов для внутри домохозяйств
         print(datetime.datetime.now(), ": Создание матрицы контактов внутри домохозяйств ... ")
@@ -732,34 +975,33 @@ class MyPopulation:
         average_school_size = int(self.schools_distribution_template["Число обучающихся на одну школу"].mean())
 
         self._create_connections_inside_schools(average_school_size=average_school_size,
-                                                                            weight=20)
+                                                weight=10)
 
         # создать матрицу контактов внутри предприятий
         print(datetime.datetime.now(), ": Создается контакты внутри предприятий ... ")
-        self._create_connections_inside_manufactures( largest_manufactures_number=20,
-                                                                                 weight=30)
+        self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
+                                                     weight=10)
 
         # создать связи внутри университетов
         print(datetime.datetime.now(), ": Создается контакты внутри университетов ... ")
         self._create_connection_inside_university(average_university_size=300,
-                                                                              average_number_of_groups=30,
-                                                                              weight=40)
+                                                  average_number_of_groups=30,
+                                                  weight=10)
 
         # добавить случайные связи
-        print(datetime.datetime.now(), ": Создается слуяайные контакты внутри популяции ... ")
-        self._create_random_connections(power=0.01, weight=50)
+        #print(datetime.datetime.now(), ": Создается слуяайные контакты внутри популяции ... ")
+        #self._create_random_connections(power=0.01, weight=10)
 
-        print(datetime.datetime.now(), ": Расчет окончен ... ")
-        #connections_matrix = connections_matrix.toarray()
-        #print(np.where(connections_matrix != np.transpose(connections_matrix)))
-        #print(connections_matrix.toarray().shape)
-        #print("---")
-        #print(np.transpose(connections_matrix)[0])
+        print(datetime.datetime.now(), ": Создание популяции завершено ... ")
+        # connections_matrix = connections_matrix.toarray()
+        # print(np.where(connections_matrix != np.transpose(connections_matrix)))
+        # print(connections_matrix.toarray().shape)
+        # print("---")
+        # print(np.transpose(connections_matrix)[0])
 
+        # plot_minimum_spanning_tree(connections_matrix)
 
-        #plot_minimum_spanning_tree(connections_matrix)
-
-        #plot_heat_map(connections_matrix)
+        # plot_heat_map(connections_matrix)
         # plot_graph(connections_matrix)
 
         return 0
