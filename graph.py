@@ -11,6 +11,7 @@ import datetime
 from scipy.interpolate import interp1d
 from tqdm.notebook import tqdm
 from dataclasses import dataclass
+from scipy.integrate import odeint
 
 from scipy import stats
 
@@ -30,6 +31,7 @@ class MyPopulation:
         self.population_total_grouped = None    # это сгруппированная популяция population_total для графиков
         self.display_status = True
         self.random_seed = random_seed
+        self.population_nodes_degrees = None
         np.random.seed(self.random_seed)
 
     def read_households_distribution_template(self, file_name: str,
@@ -63,6 +65,77 @@ class MyPopulation:
 
         return 0
 
+    def plot_sir_model_curve(self,
+                             population_size: int = 1000,
+                             beta: np.ndarray = np.array([0.2]),  # коэффициент контактов [0, 1]
+                             gamma: float = 1. / 10,  # коэффициент выздоровления в 1/ (число дней)
+                             plot_s: bool = True,  # рисовать ли кривую для восприимчивых
+                             plot_i: bool = True,  # рисовать ли кривую для инфицированных
+                             plot_r: bool = True,  # рисовать ли кривую для выздоровевших
+                             n_days: int = 160,  # промежуток дней, за которых рисовать график
+                             i0: int = 1,  # начальные значения для зараженных и выздоровевших
+                             r0: int = 0,
+                             use_generated_population_nodes_degrees = False) -> int:
+
+        # чисор восприимчивых людей
+        s0 = population_size - i0 - r0
+        t = np.linspace(0, n_days, n_days)
+
+        # Система дифференциальных уравнения SIR
+        def deriv(y, t, N, beta, gamma):
+            S, I, R = y
+            dSdt = -beta * S * I / N
+            dIdt = beta * S * I / N - gamma * I
+            dRdt = gamma * I
+            return dSdt, dIdt, dRdt
+
+        # вектор начальных значений
+        y0 = s0, i0, r0
+
+        fig = plt.figure()
+        ax = fig.add_subplot()
+
+        if use_generated_population_nodes_degrees:
+            if self.population_nodes_degrees is None:
+                # получить id людей, которые работают на предприятиях
+                ind = self.population_total.query("manufacture_number != -1")["id"]
+
+                # создать граф
+                tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+
+                # исключить контакты людей самих с собой
+                np.fill_diagonal(tmp, 0)
+                graph = nx.DiGraph(tmp)
+                self.population_nodes_degrees = nx.degree_histogram(graph)
+
+            self.population_nodes_degrees = np.array(self.population_nodes_degrees)
+            beta_inner = (self.population_nodes_degrees - self.population_nodes_degrees.min()) / \
+                         (self.population_nodes_degrees.max() - self.population_nodes_degrees.min())
+        else:
+            beta_inner = beta
+
+        for i, b in enumerate(beta_inner):
+            ret = odeint(deriv, y0, t, args=(population_size, b, gamma))
+            S, I, R = ret.T
+            if plot_s:
+                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 0 else None)
+            if plot_i:
+                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 0 else None)
+            if plot_r:
+                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 0 else None)
+
+        ax.set_xlabel('Дни')
+        ax.set_ylabel('Количество')
+        ax.yaxis.set_tick_params(length=0)
+        ax.xaxis.set_tick_params(length=0)
+        ax.grid()
+        legend = ax.legend()
+        legend.get_frame().set_alpha(0.5)
+        for spine in ('top', 'right', 'bottom', 'left'):
+            ax.spines[spine].set_visible(False)
+        plt.show()
+
+        return 0
 
     def plot_households_distribution(self) -> int:
 
@@ -635,10 +708,11 @@ class MyPopulation:
         np.random.seed(self.random_seed)
 
         if manufacture_id == -1:
-            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"]), 1)[0]
+            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"] \
+                                                                 [self.population["manufacture_number"] != -1]), 1)[0]
         else:
             manufacture_id_inner = manufacture_id
-
+        print(manufacture_id_inner)
         # получить id людей, которые работают на этом предприятии
         ind = self.population.query("manufacture_number == @manufacture_id_inner")["id"]
 
@@ -668,10 +742,10 @@ class MyPopulation:
 
         print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
         graph = nx.DiGraph(tmp)
-        hist = nx.degree_histogram(graph)
+        self.population_nodes_degrees = nx.degree_histogram(graph)
 
         # нарисовать гистограмму
-        x = np.repeat(range(len(hist)), hist)
+        x = np.repeat(range(len(self.population_nodes_degrees)), self.population_nodes_degrees)
         plt.hist(x, bins=bins)
         plt.xlabel('Степень вершины')
         plt.ylabel('Число вершин')
@@ -687,7 +761,7 @@ class MyPopulation:
         # выбрать номер предприятия, но не учитывать людей без предприятия (номер -1)
         if manufacture_id == -1:
             manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"] \
-                                                                 [self.population["manufacture_number"] != -1]), 1)[0]
+                                                            [self.population["manufacture_number"] != -1]), 1)[0]
         else:
             manufacture_id_inner = manufacture_id
 
@@ -704,7 +778,7 @@ class MyPopulation:
         # Рисуем гистограмму
         plt.bar(range(len(hist)), hist, width=0.8, color='b')
         plt.xlabel('Степень вершины')
-        plt.ylabel('Число вершинy')
+        plt.ylabel('Число вершин')
         plt.title('Гистограмма степеней вершин для предприятия ' + str(manufacture_id_inner))
         plt.show()
 
