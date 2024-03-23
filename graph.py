@@ -33,6 +33,9 @@ class MyPopulation:
         self.random_seed = random_seed
         self.population_nodes_degrees = None
         np.random.seed(self.random_seed)
+        self.connections_matrix_urban = None
+        self.connections_matrix_rural = None
+        self.population_nodes_degrees_absolute_values = None
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -68,61 +71,81 @@ class MyPopulation:
     def plot_sir_model_curve(self,
                              population_size: int = 1000,
                              beta: np.ndarray = np.array([0.2]),  # коэффициент контактов [0, 1]
-                             gamma: float = 1. / 10,  # коэффициент выздоровления в 1/ (число дней)
-                             plot_s: bool = True,  # рисовать ли кривую для восприимчивых
-                             plot_i: bool = True,  # рисовать ли кривую для инфицированных
-                             plot_r: bool = True,  # рисовать ли кривую для выздоровевших
-                             n_days: int = 160,  # промежуток дней, за которых рисовать график
-                             i0: int = 1,  # начальные значения для зараженных и выздоровевших
+                             gamma: float = 1. / 10,              # коэффициент выздоровления в 1/ (число дней)
+                             plot_s: bool = True,                 # рисовать ли кривую для восприимчивых
+                             plot_i: bool = True,                 # рисовать ли кривую для инфицированных
+                             plot_r: bool = True,                 # рисовать ли кривую для выздоровевших
+                             n_days: int = 160,                   # промежуток дней, за которых рисовать график
+                             i0: int = 1,                         # начальные значения для зараженных и выздоровевших
                              r0: int = 0,
+                             beta_0: float = 1.0,                 # значение beta_0 для системы. Для каждой группы это значение домножается на соотв. beta[i]
                              use_generated_population_nodes_degrees = False) -> int:
 
-        # чисор восприимчивых людей
-        s0 = population_size - i0 - r0
-        t = np.linspace(0, n_days, n_days)
 
         # Система дифференциальных уравнения SIR
-        def deriv(y, t, N, beta, gamma):
+        def deriv(y, t, N, beta, beta_0,  gamma):
             S, I, R = y
-            dSdt = -beta * S * I / N
-            dIdt = beta * S * I / N - gamma * I
+            dSdt = -beta_0 * beta * S * I / N
+            dIdt = beta_0 * beta * S * I / N - gamma * I
             dRdt = gamma * I
             return dSdt, dIdt, dRdt
-
-        # вектор начальных значений
-        y0 = s0, i0, r0
-
-        fig = plt.figure()
-        ax = fig.add_subplot()
 
         if use_generated_population_nodes_degrees:
             if self.population_nodes_degrees is None:
                 # получить id людей, которые работают на предприятиях
                 ind = self.population_total.query("manufacture_number != -1")["id"]
 
-                # создать граф
+                # создать матрицу контактов для выбранных людей
                 tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
 
                 # исключить контакты людей самих с собой
                 np.fill_diagonal(tmp, 0)
+
+                # создать граф для выбранных людей и рассчитать степени вершин
                 graph = nx.DiGraph(tmp)
                 self.population_nodes_degrees = nx.degree_histogram(graph)
 
             self.population_nodes_degrees = np.array(self.population_nodes_degrees)
+            self.population_nodes_degrees_absolute_values = self.population_nodes_degrees.copy()
+
+            # нормировать степени вершин в диапазон [0, 1]
             beta_inner = (self.population_nodes_degrees - self.population_nodes_degrees.min()) / \
                          (self.population_nodes_degrees.max() - self.population_nodes_degrees.min())
         else:
             beta_inner = beta
 
+        # посчитать, сколько людей вообще переболело
+        total_ever_was_infected = 0
+        fig = plt.figure()
+        ax = fig.add_subplot()
+
+        t = np.linspace(0, n_days, 5*n_days)
+
         for i, b in enumerate(beta_inner):
-            ret = odeint(deriv, y0, t, args=(population_size, b, gamma))
-            S, I, R = ret.T
+            # сколько в популяции людей с числом контактов i
+            group_size = self.population_nodes_degrees_absolute_values[i] \
+                         if use_generated_population_nodes_degrees else population_size
+
+            s0 = group_size - i0 - r0
+            y0 = s0, i0, r0
+
+            if group_size == 0 or i == 0:
+                continue
+
+            # print("Число контактов в группе:", i, "; размер группы: ", group_size)
+
+            # решить систему ОДУ для модели SIR
+            S, I, R = odeint(deriv, y0, t, args=(group_size, b, beta_0, gamma)).T
+
             if plot_s:
-                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 0 else None)
+                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 2 else None)
             if plot_i:
-                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 0 else None)
+                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 2 else None)
             if plot_r:
-                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 0 else None)
+                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 2 else None)
+
+            # запомнить, сколько людей в этой группе болело
+            total_ever_was_infected += I.max()
 
         ax.set_xlabel('Дни')
         ax.set_ylabel('Количество')
@@ -134,6 +157,9 @@ class MyPopulation:
         for spine in ('top', 'right', 'bottom', 'left'):
             ax.spines[spine].set_visible(False)
         plt.show()
+
+        print(f"Всего было заражено {int(total_ever_was_infected)} людей \
+        из {self.population_nodes_degrees_absolute_values.sum()}")
 
         return 0
 
@@ -187,26 +213,31 @@ class MyPopulation:
 
         return 0
 
-
     def generate_total_population(self,
-                                  population_size: int) -> int:
+                                  population_size: int,
+                                  largest_manufactures_number: int = 20,
+                                  lockdown: bool = False) -> int:
 
         """ Метод создает популяцию городскую + сельскую """
         print(datetime.datetime.now(), ": Строится популяция для городского населения ... ")
         self.create_population(population_type="urban",
                                population_size=(population_size // 2),
-                               largest_manufactures_number=12)
+                               largest_manufactures_number=largest_manufactures_number,
+                               lockdown=lockdown)
 
         urban_population_raw = self.population.copy()
+        self.connections_matrix_urban = self.connections_matrix.copy()
         urban_population = self.population.groupby(["age_group", "sex", "population_type"],
                                                    as_index=False).count()
 
         print(datetime.datetime.now(), ": Строится популяция для сельского населения ... ")
         self.create_population(population_type="rural",
                                population_size=(population_size // 2),
-                               largest_manufactures_number=12)
+                               largest_manufactures_number=largest_manufactures_number,
+                               lockdown=lockdown)
 
         rural_population_raw = self.population.copy()
+        self.connections_matrix_rural = self.connections_matrix.copy()
         rural_population = self.population.groupby(["age_group", "sex", "population_type"],
                                                    as_index=False).count()
 
@@ -718,6 +749,7 @@ class MyPopulation:
 
         # создать граф
         tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+
         np.fill_diagonal(tmp, 0)
         graph = nx.DiGraph(tmp)
         pos = nx.circular_layout(graph)
@@ -728,20 +760,36 @@ class MyPopulation:
         return 0
 
     def plot_total_connections_hist(self,
-                                    bins: int = 15) -> Literal[0, 1]:
+                                    bins: int = 15,
+                                    population_type: Literal["urban", "rural"] = None,
+                                    display_status=True) -> Literal[0, 1]:
         """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
 
-        # получить id людей, которые работают на предприятиях
-        ind = self.population_total.query("manufacture_number != -1")["id"]
+        if display_status:
+            print(datetime.datetime.now(), ": Создается граф по матрице контактов ... ")
 
-        # создать граф
-        tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+        if population_type is None:
+            print("Ошибка: Нет матрицы контактов")
+            return 1
+
+        if population_type not in ["urban", "rural"]:
+            print("Ошибка: Недопустимый тип популяции")
+            return 1
+
+        matrix_inner = None
+        if population_type == "urban":
+            matrix_inner = self.connections_matrix_urban.toarray()
+
+        if population_type == "rural":
+            matrix_inner = self.connections_matrix_rural.toarray()
 
         # исключить контакты людей самих с собой
-        np.fill_diagonal(tmp, 0)
+        np.fill_diagonal(matrix_inner, 0)
 
-        print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
-        graph = nx.DiGraph(tmp)
+        if display_status:
+            print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
+
+        graph = nx.DiGraph(matrix_inner)
         self.population_nodes_degrees = nx.degree_histogram(graph)
 
         # нарисовать гистограмму
@@ -749,7 +797,7 @@ class MyPopulation:
         plt.hist(x, bins=bins)
         plt.xlabel('Степень вершины')
         plt.ylabel('Число вершин')
-        plt.title('Гистограмма степеней вершин популяции')
+        plt.title(f'Гистограмма степеней вершин для {"городского" if population_type == "urban" else "сельского"} населения')
         plt.show()
 
         return 0
@@ -770,13 +818,15 @@ class MyPopulation:
 
         # создать граф
         tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+
         np.fill_diagonal(tmp, 0)
-        graph = nx.DiGraph(tmp)
+        graph = nx.Graph(tmp)
 
         hist = nx.degree_histogram(graph)
 
         # Рисуем гистограмму
-        plt.bar(range(len(hist)), hist, width=0.8, color='b')
+        plt.bar(np.arange(len(hist), dtype=np.int8), hist, width=0.8, color='b')
+        plt.xticks(np.arange(len(hist), dtype=np.int8), np.arange(len(hist), dtype=np.int8))
         plt.xlabel('Степень вершины')
         plt.ylabel('Число вершин')
         plt.title('Гистограмма степеней вершин для предприятия ' + str(manufacture_id_inner))
@@ -787,10 +837,15 @@ class MyPopulation:
     def _create_connections_inside_manufactures(self,
                                                 largest_manufactures_number: int,
                                                 weight: int = 20,
-                                                betta: float = 0.3) -> int:
+                                                betta: float = 0.3,
+                                                lockdown: bool = False) -> int:
 
         # определить число людей работоспособного возраста
         number_of_workers = self.population.query("age > 18").shape[0]
+
+        # если введен локдаун, работает только 30 процентов населения
+        if lockdown:
+            number_of_workers *= 0.3
 
         self.population["manufacture_number"] = -1
 
@@ -799,10 +854,19 @@ class MyPopulation:
 
         a = np.power(10, np.arange(order))[::-1]
 
-        m = int((number_of_workers - a @ np.ones(a.size) * largest_manufactures_number) // (a @ np.arange(a.size)))
-        if m <= 0:
-            print(m)
-            raise Exception
+        m, iter_number = -1, 0
+        while m <= 0:
+            m = int((number_of_workers - a @ np.ones(a.size) * largest_manufactures_number) // (a @ np.arange(a.size)))
+            if m <= 0:
+                largest_manufactures_number -= 1
+                if largest_manufactures_number <= 0:
+                    raise Exception
+
+                print(f"Значение параметра largest_manufactures_number было изменено на: {largest_manufactures_number}")
+                if iter_number > 10:
+                    raise Exception
+
+                iter_number += 1
 
         self.manufactures_sizes_series = pd.Series(
             np.repeat(a, m * np.arange(a.size) + largest_manufactures_number)).value_counts()
@@ -901,13 +965,28 @@ class MyPopulation:
         return 0
 
     def plot_minimum_spanning_tree(self,
-                                   display_status: bool = True) -> int:
-        """ Функция рисует остовное дерево по матрце контактов """
+                                   display_status: bool = True,
+                                   population_type: Literal["urban", "rural"] = None) -> int:
+        """ Функция рисует остовное дерево по матрице контактов """
 
         if display_status:
             print(datetime.datetime.now(), ": Создается граф по матрице контактов ... ")
 
-        matrix_inner = self.connections_matrix.toarray()
+        if population_type is None:
+            print("Ошибка: Нет матрицы контактов")
+            return 1
+
+        if population_type not in ["urban", "rural"]:
+            print("Ошибка: Недопустимый тип популяции")
+            return 1
+
+        matrix_inner = None
+        if population_type == "urban":
+            matrix_inner = self.connections_matrix_urban.toarray()
+
+        if population_type == "rural":
+            matrix_inner = self.connections_matrix_rural.toarray()
+
         np.fill_diagonal(matrix_inner, 0)
 
         mst = nx.minimum_spanning_tree(nx.from_numpy_array(matrix_inner))
@@ -921,9 +1000,19 @@ class MyPopulation:
         plt.show()
         return 0
 
-    def plot_heat_map(self) -> int:
+    def plot_heat_map(self,
+                      population_type: Literal["urban", "rural"] = None) -> int:
         """ Функция рисует тепловую карту матрицы контактов """
-        plt.imshow(self.connections_matrix.toarray(), cmap="hot", interpolation="nearest")
+        if population_type is None:
+            print("Ошибка: Нет матрицы контактов")
+            return 1
+
+        if population_type == "urban":
+            plt.imshow(self.connections_matrix_urban.toarray(), cmap="hot", interpolation="nearest")
+
+        if population_type == "rural":
+            plt.imshow(self.connections_matrix_rural.toarray(), cmap="hot", interpolation="nearest")
+
         plt.colorbar()
         plt.show()
         return 0
@@ -964,10 +1053,12 @@ class MyPopulation:
                           households_filename: str = "households.xlsx",
                           age_sex_distribution_filename: str = "age_sex_distribution_percentage.xlsx",
                           manufactures_filename: str = "manufactures.xlsx",
-                          schools_filename: str = "schools.xlsx") -> int:
+                          schools_filename: str = "schools.xlsx",
+                          lockdown: bool = False) -> int:
 
         print(datetime.datetime.now(), ": Запуск функции создания популяции ... ")
 
+        # считать все необходимые шаблоны для генерации
         self.read_households_distribution_template(file_name=households_filename)
         self.read_age_sex_distribution_template(file_name=age_sex_distribution_filename)
         self.read_manufactures_distribution_template(file_name=manufactures_filename)
@@ -976,7 +1067,6 @@ class MyPopulation:
         # посчитать, сколько человек надо на каждый тип домохозяйства
         self._get_household_ratio()
 
-        households_number = np.zeros_like(self.household_ratio_urban)
         # найти число людей для каждого типа домохозяйства
         if population_type == "urban":
             _population_type = self.household_ratio_urban
@@ -995,7 +1085,7 @@ class MyPopulation:
                      "women" + "_" + population_type: "women"}
         )
 
-        # 1.2 считаем что мужчин и женщин равное количество в популяции
+        # 1.2 считаем, что мужчин и женщин равное количество в популяции
         # определяем, сколько человек в каждой возрастной категории
         base.loc[:, ["men", "women"]] = base.loc[:, ["men", "women"]] * population_size * 0.5
         base.loc[base["age"] == '70 лет и более', "age"] = "70"
@@ -1008,29 +1098,28 @@ class MyPopulation:
         women = self._create_population_from_data(population_type="women", distribution_template=base)
 
         # 2 создать популяции из мужчин и женщин согласно шаблону
-        self.population = pd.concat([men, women]).reset_index(drop=True)
+        population = pd.concat([men, women]).reset_index(drop=True)
 
-        self.population["age_group"] = np.select([(self.population.age >= 0) & (self.population.age <= 4),
-                                                  (self.population.age >= 5) & (self.population.age <= 9),
-                                                  (self.population.age >= 10) & (self.population.age <= 14),
-                                                  (self.population.age >= 15) & (self.population.age <= 19),
-                                                  (self.population.age >= 20) & (self.population.age <= 24),
-                                                  (self.population.age >= 25) & (self.population.age <= 29),
-                                                  (self.population.age >= 30) & (self.population.age <= 34),
-                                                  (self.population.age >= 35) & (self.population.age <= 39),
-                                                  (self.population.age >= 40) & (self.population.age <= 44),
-                                                  (self.population.age >= 45) & (self.population.age <= 49),
-                                                  (self.population.age >= 50) & (self.population.age <= 54),
-                                                  (self.population.age >= 55) & (self.population.age <= 59),
-                                                  (self.population.age >= 60) & (self.population.age <= 64),
-                                                  (self.population.age >= 65) & (self.population.age <= 69),
-                                                  (self.population.age >= 70)],
-                                                 ['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24', '25 – 29',
-                                                  '30 – 34',
-                                                  '35 – 39', '40 – 44', '45 – 49', '50 – 54', '55 – 59', '60 – 64',
-                                                  '65 – 69',
-                                                  '70 лет и более'])
+        population["age_group"] = np.select([(population.age >= 0) & (population.age <= 4),
+                                                    (population.age >= 5) & (population.age <= 9),
+                                                    (population.age >= 10) & (population.age <= 14),
+                                                    (population.age >= 15) & (population.age <= 19),
+                                                    (population.age >= 20) & (population.age <= 24),
+                                                    (population.age >= 25) & (population.age <= 29),
+                                                    (population.age >= 30) & (population.age <= 34),
+                                                    (population.age >= 35) & (population.age <= 39),
+                                                    (population.age >= 40) & (population.age <= 44),
+                                                    (population.age >= 45) & (population.age <= 49),
+                                                    (population.age >= 50) & (population.age <= 54),
+                                                    (population.age >= 55) & (population.age <= 59),
+                                                    (population.age >= 60) & (population.age <= 64),
+                                                    (population.age >= 65) & (population.age <= 69),
+                                                    (population.age >= 70)],
+                                            ['0 – 4', '5 – 9', '10 – 14', '15 – 19', '20 – 24',
+                                                     '25 – 29', '30 – 34', '35 – 39', '40 – 44', '45 – 49',
+                                                     '50 – 54', '55 – 59', '60 – 64', '65 – 69', '70 лет и более'])
 
+        self.population = population
         # 2.1 разбить полученную популяцию на домохозяйства
         print(datetime.datetime.now(), ": Формирование домохозяйств ... ")
         self._create_connections_in_population(households_number=pd.Series(data=households_number.astype("int"),
@@ -1045,37 +1134,43 @@ class MyPopulation:
         self.population["population_type"] = population_type
 
         # 4 создать матрицу контактов внутри школ
-        print(datetime.datetime.now(), ": Создается контакты внутри школ ... ")
-        average_school_size = int(self.schools_distribution_template["Число обучающихся на одну школу"].mean())
+        if lockdown and population_type == "urban":
+            print(datetime.datetime.now(), ": Связи внутри школ не создаются, как так введен локдаун ... ")
+        else:
+            print(datetime.datetime.now(), ": Создается контакты внутри школ ... ")
+            average_school_size = int(self.schools_distribution_template["Число обучающихся на одну школу"].mean())
+            self._create_connections_inside_schools(average_school_size=average_school_size,
+                                                    weight=10)
 
-        self._create_connections_inside_schools(average_school_size=average_school_size,
-                                                weight=10)
+        # 5 создать матрицу контактов внутри предприятий
+        if lockdown and population_type == "urban":
+            print(datetime.datetime.now(), ": Контакты внутри предприятий создаются только для 30% популяции ... ")
+            self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
+                                                         weight=10,
+                                                         lockdown=lockdown)
+        else:
+            print(datetime.datetime.now(), ": Создается контакты внутри предприятий ... ")
+            self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
+                                                         weight=10,
+                                                         lockdown=lockdown)
 
-        # создать матрицу контактов внутри предприятий
-        print(datetime.datetime.now(), ": Создается контакты внутри предприятий ... ")
-        self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
-                                                     weight=10)
+        # 6 создать связи внутри университетов
+        if lockdown and population_type == "urban":
+            print(datetime.datetime.now(), ": Связи внутри университетов не создаются, как так введен локдаун ... ")
+        else:
+            print(datetime.datetime.now(), ": Создается контакты внутри университетов ... ")
+            self._create_connection_inside_university(average_university_size=300,
+                                                      average_number_of_groups=30,
+                                                      weight=10)
 
-        # создать связи внутри университетов
-        print(datetime.datetime.now(), ": Создается контакты внутри университетов ... ")
-        self._create_connection_inside_university(average_university_size=300,
-                                                  average_number_of_groups=30,
-                                                  weight=10)
-
-        # добавить случайные связи
-        #print(datetime.datetime.now(), ": Создается слуяайные контакты внутри популяции ... ")
-        #self._create_random_connections(power=0.01, weight=10)
+        # найти число людей для каждого типа домохозяйства
+        if population_type == "urban":
+            self.connections_matrix_urban = self.connections_matrix.copy()
+        elif population_type == "rural":
+            self.connections_matrix_rural = self.connections_matrix.copy()
+        else:
+            raise Exception
 
         print(datetime.datetime.now(), ": Создание популяции завершено ... ")
-        # connections_matrix = connections_matrix.toarray()
-        # print(np.where(connections_matrix != np.transpose(connections_matrix)))
-        # print(connections_matrix.toarray().shape)
-        # print("---")
-        # print(np.transpose(connections_matrix)[0])
-
-        # plot_minimum_spanning_tree(connections_matrix)
-
-        # plot_heat_map(connections_matrix)
-        # plot_graph(connections_matrix)
 
         return 0
