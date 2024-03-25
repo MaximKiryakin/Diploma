@@ -266,13 +266,20 @@ class MyPopulation:
 
 
     def plot_households_distribution_generated_population(self,
-                                                          population_size: int) -> int:
+                                                          ylim: int = 5000) -> int:
         """ Метод рисует распределение по домохозяйствам для сгенерированной популяции"""
         if self.population_total is None:
-            self.generate_total_population(population_size=population_size)
+            print("Нет данных для отрисовки")
+            raise Exception
 
-        tmp = self.population_total.query("population_type == 'urban'").groupby("household_id").count().groupby(
-            "id").count().reset_index()[["id", "age"]].head(6).transpose()
+        tmp = self.population_total \
+                  .query("population_type == 'urban'") \
+                  .groupby("household_id") \
+                  .count() \
+                  .groupby("id") \
+                  .count() \
+                  .reset_index()[["id", "age"]].head(6).transpose()
+
         tmp.columns = tmp.loc["id", :]
         tmp = tmp.tail(1)
         tmp_urban = tmp.melt()
@@ -288,8 +295,8 @@ class MyPopulation:
         fig, axs = plt.subplots(1, 2, figsize=(20, 8))
         plt.style.use('ggplot')
 
-        axs[0].set_ylim(0, 5000)
-        axs[1].set_ylim(0, 5000)
+        axs[0].set_ylim(0, ylim)
+        axs[1].set_ylim(0, ylim)
 
         sns.barplot(x='id', y='value', data=tmp_rural, ax=axs[1])
         sns.barplot(x='id', y='value', data=tmp_urban, ax=axs[0])
@@ -345,7 +352,8 @@ class MyPopulation:
                   ": Выполняется отрисовка возрастных пирамид для сгенерированной популяции ... ")
 
             if self.population_total_grouped is None:
-                self.generate_total_population(population_size=population_size)
+                print("Задан режим построения пирамиды по существующей популяции, но она не была сгенерирована")
+                raise Exception
 
             age_sex_distribution_template_inner = self.population_total_grouped
 
@@ -396,6 +404,7 @@ class MyPopulation:
         for ax in axs.flatten():
             ax.xaxis.set_major_formatter(FuncFormatter(abs_fmt))
 
+        plt.show()
         return 0
 
 
