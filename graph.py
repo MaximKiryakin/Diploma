@@ -129,7 +129,7 @@ class MyPopulation:
             s0 = group_size - i0 - r0
             y0 = s0, i0, r0
 
-            if group_size == 0 or i == 0:
+            if group_size == 0:
                 continue
 
             # print("Число контактов в группе:", i, "; размер группы: ", group_size)
@@ -138,11 +138,11 @@ class MyPopulation:
             S, I, R = odeint(deriv, y0, t, args=(group_size, b, beta_0, gamma)).T
 
             if plot_s:
-                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 2 else None)
+                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 0 else None)
             if plot_i:
-                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 2 else None)
+                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 0 else None)
             if plot_r:
-                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 2 else None)
+                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 0 else None)
 
             # запомнить, сколько людей в этой группе болело
             total_ever_was_infected += I.max()
@@ -158,8 +158,10 @@ class MyPopulation:
             ax.spines[spine].set_visible(False)
         plt.show()
 
-        print(f"Всего было заражено {int(total_ever_was_infected)} людей \
-        из {self.population_nodes_degrees_absolute_values.sum()}")
+        infected = int(total_ever_was_infected)
+        total = self.population_nodes_degrees_absolute_values.sum()
+
+        print(f"Всего было заражено {infected} людей из {total} ({np.round(infected / total * 100, 2)}%)")
 
         return 0
 
