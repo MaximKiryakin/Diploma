@@ -2,6 +2,18 @@
 import load_data as ld
 
 import graph as gr
+import pandas as pd
+import load_data as ld
+import seaborn as sns
+import graph as gr
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+import numpy as np
+import warnings
+
 import networkx as nx
 import matplotlib.pyplot as plt
 from scipy.sparse import lil_matrix
@@ -17,6 +29,7 @@ gr.create_population(households_distribution_template=households,
                      population_size=10000,
                      schools_distribution_template=schools)
 """
+"""
 p = gr.MyPopulation()
 p.create_population("urban",20000, largest_manufactures_number=12)
 #p.plot_graph()
@@ -24,4 +37,10 @@ p.create_population("urban",20000, largest_manufactures_number=12)
 #p.plot_manufactures_size_distribution()
 #p.plot_manufactures_connections_hist()
 p.plot_total_connections_hist()
+"""
 
+population_size = 20000
+model = gr.MyPopulation()
+model.generate_total_population(population_size = population_size,
+                                largest_manufactures_number=13,
+                                lockdown=False)

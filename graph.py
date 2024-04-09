@@ -9,7 +9,8 @@ plt.style.use('ggplot')
 import networkx as nx
 import datetime
 from scipy.interpolate import interp1d
-from tqdm.notebook import tqdm
+#from tqdm.notebook import tqdm
+from tqdm import tqdm
 from dataclasses import dataclass
 from scipy.integrate import odeint
 
@@ -36,6 +37,9 @@ class MyPopulation:
         self.connections_matrix_urban = None
         self.connections_matrix_rural = None
         self.population_nodes_degrees_absolute_values = None
+        self.betta_dict = None
+        self.mean_weight_beta = None
+        self.moment_of_change_dict = None
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -79,7 +83,10 @@ class MyPopulation:
                              i0: int = 1,                         # начальные значения для зараженных и выздоровевших
                              r0: int = 0,
                              beta_0: float = 1.0,                 # значение beta_0 для системы. Для каждой группы это значение домножается на соотв. beta[i]
-                             use_generated_population_nodes_degrees = False) -> int:
+                             use_generated_population_nodes_degrees=False,
+                             population_type="urban",
+                             plot_single_group: int = -1,
+                             title = "") -> int:
 
 
         # Система дифференциальных уравнения SIR
@@ -92,11 +99,13 @@ class MyPopulation:
 
         if use_generated_population_nodes_degrees:
             if self.population_nodes_degrees is None:
-                # получить id людей, которые работают на предприятиях
-                ind = self.population_total.query("manufacture_number != -1")["id"]
 
-                # создать матрицу контактов для выбранных людей
-                tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
+                if population_type == "urban":
+                    tmp = self.connections_matrix_urban.toarray()
+                elif population_type == "urban":
+                    tmp = self.connections_matrix_rural.toarray()
+                else:
+                    raise Exception
 
                 # исключить контакты людей самих с собой
                 np.fill_diagonal(tmp, 0)
@@ -114,6 +123,12 @@ class MyPopulation:
         else:
             beta_inner = beta
 
+        self.betta_dict = dict(np.array([np.arange(self.population_nodes_degrees.size), beta_inner]).T)
+
+        # получить средневзвешенную бету по всем группам
+        self.mean_weight_beta = (np.array(list(self.betta_dict.keys())) * np.array(list(self.betta_dict.values()))) \
+                                    .sum() / np.array(list(self.betta_dict.keys())).sum()
+
         # посчитать, сколько людей вообще переболело
         total_ever_was_infected = 0
         fig = plt.figure()
@@ -121,7 +136,14 @@ class MyPopulation:
 
         t = np.linspace(0, n_days, 5*n_days)
 
+        # хотим так же отследить момент на какой день приходится пик заражения
+        self.moment_of_change_dict = dict()
         for i, b in enumerate(beta_inner):
+
+            # если нужно нарисовать только один конкретный график для демонстрации
+            if plot_single_group != -1 and plot_single_group != i:
+                continue
+
             # сколько в популяции людей с числом контактов i
             group_size = self.population_nodes_degrees_absolute_values[i] \
                          if use_generated_population_nodes_degrees else population_size
@@ -132,23 +154,24 @@ class MyPopulation:
             if group_size == 0:
                 continue
 
-            # print("Число контактов в группе:", i, "; размер группы: ", group_size)
-
             # решить систему ОДУ для модели SIR
             S, I, R = odeint(deriv, y0, t, args=(group_size, b, beta_0, gamma)).T
 
+            self.moment_of_change_dict[i] = np.argmax(I)
+
             if plot_s:
-                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 0 else None)
+                ax.plot(t, S, 'b', alpha=0.5, lw=2, label='Susceptible' if i == 0 or plot_single_group != -1 else None)
             if plot_i:
-                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 0 else None)
+                ax.plot(t, I, 'r', alpha=0.5, lw=2, label='Infected' if i == 0 or plot_single_group != -1 else None)
             if plot_r:
-                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 0 else None)
+                ax.plot(t, R, 'g', alpha=0.5, lw=2, label='Recovered' if i == 0 or plot_single_group != -1 else None)
 
             # запомнить, сколько людей в этой группе болело
             total_ever_was_infected += I.max()
 
         ax.set_xlabel('Дни')
         ax.set_ylabel('Количество')
+        ax.set_title(title)
         ax.yaxis.set_tick_params(length=0)
         ax.xaxis.set_tick_params(length=0)
         ax.grid()
@@ -161,11 +184,13 @@ class MyPopulation:
         infected = int(total_ever_was_infected)
         total = self.population_nodes_degrees_absolute_values.sum()
 
-        print(f"Всего было заражено {infected} людей из {total} ({np.round(infected / total * 100, 2)}%)")
+        if plot_single_group == -1:
+            print(f"Всего было заражено {infected} людей из {total} ({np.round(infected / total * 100, 2)}%)")
 
         return 0
 
-    def plot_households_distribution(self) -> int:
+    def plot_households_distribution(self,
+                                     save_path: str = "") -> int:
 
         households_grouped = self.households_distribution_template[["region_type", "1_person", "2_persons",
                                                                     "3_persons", "4_persons", "5_persons",
@@ -175,7 +200,7 @@ class MyPopulation:
                                  .reset_index()
 
         plt.figure(figsize=(20, 10))
-        fig, axs = plt.subplots(1, 2, figsize=(20, 8))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 10))
 
         axs[0].set_ylim(0, 4.5 * 10 ** 7)
         axs[1].set_ylim(0, 4.5 * 10 ** 7)
@@ -205,13 +230,16 @@ class MyPopulation:
         sns.barplot(x='variable', y='value', data=df_melted_rural, ax=axs[1])
         sns.barplot(x='variable', y='value', data=df_melted_urban, ax=axs[0])
 
-        axs[0].set_title("Городское население")
+        axs[0].set_title("Городское население", fontdict={'fontsize': 20})
         axs[0].set_xlabel("Число людей в семье")
         axs[0].set_ylabel("Количество семей")
 
-        axs[1].set_title("Сельское население")
+        axs[1].set_title("Сельское население", fontdict={'fontsize': 20})
         axs[1].set_xlabel("Число людей в семье")
         axs[1].set_ylabel("Количество семей")
+
+        if save_path != "":
+            plt.savefig(save_path)
 
         return 0
 
@@ -268,7 +296,8 @@ class MyPopulation:
 
 
     def plot_households_distribution_generated_population(self,
-                                                          ylim: int = 5000) -> int:
+                                                          ylim: int = 5000,
+                                                          save_path: str = "") -> int:
         """ Метод рисует распределение по домохозяйствам для сгенерированной популяции"""
         if self.population_total is None:
             print("Нет данных для отрисовки")
@@ -292,9 +321,8 @@ class MyPopulation:
         tmp = tmp.tail(1)
         tmp_rural = tmp.melt()
 
-
         plt.figure(figsize=(20, 10))
-        fig, axs = plt.subplots(1, 2, figsize=(20, 8))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 10))
         plt.style.use('ggplot')
 
         axs[0].set_ylim(0, ylim)
@@ -303,13 +331,16 @@ class MyPopulation:
         sns.barplot(x='id', y='value', data=tmp_rural, ax=axs[1])
         sns.barplot(x='id', y='value', data=tmp_urban, ax=axs[0])
 
-        axs[0].set_title("Городское население")
+        axs[0].set_title("Городское население", fontdict={'fontsize': 20})
         axs[0].set_xlabel("Число людей в семье")
         axs[0].set_ylabel("Количество семей")
 
-        axs[1].set_title("Сельское население")
+        axs[1].set_title("Сельское население", fontdict={'fontsize': 20})
         axs[1].set_xlabel("Число людей в семье")
         axs[1].set_ylabel("Количество семей")
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         return 0
 
@@ -317,7 +348,8 @@ class MyPopulation:
                                   max_xlimit: int,
                                   population_size: int,
                                   use_generated_population: bool = False,
-                                  age_sex_distribution_filename: str = "age_sex_distribution_percentage.xlsx") -> int:
+                                  age_sex_distribution_filename: str = "age_sex_distribution_percentage.xlsx",
+                                  save_path: str = "") -> int:
         """ Внимание: этот метод меняет атрибут population !!!"""
 
         # 1 Подготовка данных
@@ -361,12 +393,12 @@ class MyPopulation:
 
         # 2. Отрисовка графика
         plt.figure(figsize=(20, 10))
-        fig, axs = plt.subplots(1, 2, figsize=(22, 8))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 10))
 
         axs[0].set_xlim(-max_xlimit, max_xlimit)
         axs[1].set_xlim(-max_xlimit, max_xlimit)
 
-        AgeClass = age_sex_distribution_template_inner["age_group"]
+        AgeClass = age_sex_distribution_template_inner["age_group"][::-1]
 
         sns.barplot(x=-1 * age_sex_distribution_template_inner.men_urban, y="age_group",
                     data=age_sex_distribution_template_inner,
@@ -384,11 +416,11 @@ class MyPopulation:
                     data=age_sex_distribution_template_inner,
                     order=AgeClass, color="blue", label="женщины", ax=axs[1])
 
-        axs[0].set_title("Городское население")
+        axs[0].set_title("Городское население", fontdict={'fontsize': 20})
         axs[0].set_xlabel("Численность")
         axs[0].set_ylabel("Возрастная группа")
 
-        axs[1].set_title("Сельское население")
+        axs[1].set_title("Сельское население", fontdict={'fontsize': 20})
         axs[1].set_xlabel("Численность")
         axs[1].set_ylabel("Возрастная группа")
 
@@ -405,6 +437,9 @@ class MyPopulation:
         from matplotlib.ticker import FuncFormatter
         for ax in axs.flatten():
             ax.xaxis.set_major_formatter(FuncFormatter(abs_fmt))
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         plt.show()
         return 0
@@ -693,7 +728,8 @@ class MyPopulation:
 
     def _create_connections_inside_schools(self,
                                            average_school_size: int,
-                                           weight: int = 10) -> int:
+                                           weight: int = 10,
+                                           betta: float = 0.2) -> int:
         """ Функция создает связи внутри классов по школам """
 
         average_class_size = int(average_school_size // 11)
@@ -704,30 +740,58 @@ class MyPopulation:
         population_inner["school_number"] = -1
 
         # создать словарь с индексами по возрастным категориям
-        for i in range(number_of_schools):
+        for j in range(number_of_schools):
             for age in range(7, 18, 1):
                 # выбрать детей, которые будут ходить в школу
                 # из числа детей, подходящих по возрасту
                 ind = population_inner.query("(age == @age) & (school_number == -1)")["id"]
                 students = np.random.choice(ind, min(average_class_size, ind.size), replace=False)
 
-                if not len(students):
+                if  len(students) <= 1:
                     continue
 
                 # закрепить за этими детьми школу
-                population_inner.loc[students, "school_number"] = i
+                population_inner.loc[students, "school_number"] = j
 
-                self._add_connections_to_matrix(nodes=students, weight=weight)
+                # сделать так, чтобы изначально все workers стоят по кругу и соединены только с соседом
+                for i in range(len(students) - 1):
+                    self.connections_matrix[students[i], students[i + 1]] = 1
+                    self.connections_matrix[students[i + 1], students[i]] = 1
+                self.connections_matrix[students[0], students[-1]] = 1
+                self.connections_matrix[students[-1], students[0]] = 1
+
+                number_of_ripped_edges = int(average_class_size * betta)
+                index = np.random.choice(students, min(number_of_ripped_edges, len(students)), replace=False)
+                for i in index:
+                    if i != students.size - 1:
+                        # разорвать связь
+                        self.connections_matrix[i, i + 1] = 0
+                        self.connections_matrix[i + 1, i] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(students[students != i], 1, replace=False)[0]
+                        self.connections_matrix[i, new_node] = 1
+                        self.connections_matrix[new_node, i] = 1
+                    else:
+                        # разорвать связь
+                        self.connections_matrix[0, 0 + 1] = 0
+                        self.connections_matrix[0 + 1, 0] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(students[students != 0], 1, replace=False)[0]
+                        self.connections_matrix[0, new_node] = 1
+                        self.connections_matrix[new_node, 0] = 1
+
+
+                #self._add_connections_to_matrix(nodes=students, weight=weight)
 
         return 0
 
-    def plot_manufactures_size_distribution(self) -> Literal[0, 1]:
+    def plot_manufactures_size_distribution(self, save_path: str = "") -> Literal[0, 1]:
         """ Функция рисует, как распределены предприятия по размерам """
 
         if self.display_status:
             print(datetime.datetime.now(), ": Рисуется распределение домохозяйств по размеру ... ")
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(10, 10))
         keys, values = list(self.manufactures_sizes_dict.keys()), list(self.manufactures_sizes_dict.values())
 
         # поставить логарифмическую шкалу
@@ -739,24 +803,27 @@ class MyPopulation:
         ax.grid(True)
         ax.set_xlabel("Размер предприятия (число сотрудников)")
         ax.set_ylabel("Количество предприятий")
-        ax.set_title("Распределение предприятий по размеру")
+        ax.set_title("Распределение предприятий по размеру", fontdict={'fontsize': 20})
         plt.show()
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         return 0
 
-    def plot_manufactures_connections_graph(self, manufacture_id: int = -1) -> Literal[0, 1]:
+    def plot_manufactures_connections_graph(self, departament_id: int = -1) -> Literal[0, 1]:
         """ Функция рисует граф контактов внутри предприятия"""
 
         np.random.seed(self.random_seed)
 
-        if manufacture_id == -1:
-            manufacture_id_inner = np.random.choice(np.array(self.population["manufacture_number"] \
-                                                                 [self.population["manufacture_number"] != -1]), 1)[0]
+        if departament_id == -1:
+            departament_id_inner = np.random.choice(np.array(self.population["departament_number"] \
+                                                                 [self.population["departament_number"] != -1]), 1)[0]
         else:
-            manufacture_id_inner = manufacture_id
-        print(manufacture_id_inner)
+            departament_id_inner = departament_id
+
         # получить id людей, которые работают на этом предприятии
-        ind = self.population.query("manufacture_number == @manufacture_id_inner")["id"]
+        ind = self.population.query("departament_number == @departament_id")["id"]
 
         # создать граф
         tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
@@ -773,7 +840,8 @@ class MyPopulation:
     def plot_total_connections_hist(self,
                                     bins: int = 15,
                                     population_type: Literal["urban", "rural"] = None,
-                                    display_status=True) -> Literal[0, 1]:
+                                    display_status=True,
+                                    save_path: str = "") -> Literal[0, 1]:
         """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
 
         if display_status:
@@ -804,12 +872,17 @@ class MyPopulation:
         self.population_nodes_degrees = nx.degree_histogram(graph)
 
         # нарисовать гистограмму
+        fig, ax = plt.subplots(figsize=(10, 10))
         x = np.repeat(range(len(self.population_nodes_degrees)), self.population_nodes_degrees)
-        plt.hist(x, bins=bins)
-        plt.xlabel('Степень вершины')
-        plt.ylabel('Число вершин')
-        plt.title(f'Гистограмма степеней вершин для {"городского" if population_type == "urban" else "сельского"} населения')
+        ax.hist(x, bins=bins)
+        ax.set_xlabel('Степень вершины')
+        ax.set_ylabel('Число вершин')
+        ax.set_title(f'Гистограмма степеней вершин для {"городского" if population_type == "urban" else "сельского"} населения',
+                  fontdict={'fontsize': 20})
         plt.show()
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         return 0
 
@@ -848,7 +921,7 @@ class MyPopulation:
     def _create_connections_inside_manufactures(self,
                                                 largest_manufactures_number: int,
                                                 weight: int = 20,
-                                                betta: float = 0.3,
+                                                betta: float = 0.05,
                                                 lockdown: bool = False) -> int:
 
         # определить число людей работоспособного возраста
@@ -859,6 +932,7 @@ class MyPopulation:
             number_of_workers *= 0.3
 
         self.population["manufacture_number"] = -1
+        self.population["departament_number"] = -1
 
         # определить порядок числа number_of_workers
         order = int(np.floor(np.log10(number_of_workers)))
@@ -883,48 +957,62 @@ class MyPopulation:
             np.repeat(a, m * np.arange(a.size) + largest_manufactures_number)).value_counts()
         self.manufactures_sizes_dict = self.manufactures_sizes_series.to_dict()
 
-        for manufacture_size in self.manufactures_sizes_dict.keys():
+        for manufacture_size in tqdm(self.manufactures_sizes_dict.keys()):
             for j in range(self.manufactures_sizes_dict[manufacture_size]):
 
                 # выбрать людей трудоспособного возраста, за которыми не закреплено предприятие
                 ind = self.population.query("(age >= 19) & (manufacture_number == -1)")["id"]
 
                 # выбрать людей, которых закрепим за текущим предприятием
-                workers = np.random.choice(ind, manufacture_size, replace=False)
-                if not len(workers):
+                workers_total = np.random.choice(ind, manufacture_size, replace=False)
+
+                if not len(workers_total):
                     continue
 
                 # закрепить за этими людьми номер предприятие
-                self.population.loc[workers, "manufacture_number"] = j * manufacture_size
+                self.population.loc[workers_total, "manufacture_number"] = j * manufacture_size
 
-                # создать связи между людьми по схеме small-world
-                number_of_nodes = len(workers)
-                # сделать так, чтобы изначально все workers стоят по кругу и соединены только с соседом
-                for i in range(len(workers) - 1):
-                    self.connections_matrix[workers[i], workers[i + 1]] = 1
-                    self.connections_matrix[workers[i + 1], workers[i]] = 1
-                self.connections_matrix[workers[0], workers[-1]] = 1
-                self.connections_matrix[workers[-1], workers[0]] = 1
+                # -- создать связи между людьми по схеме small-world --
+                # Так как предприятия могут быть очень большими и в них может работать по несколько тысяч человек
+                # было решено разбить каждое предприятие на департаменты и в них произвести моделирование по
+                # алгоритму small-world
 
-                number_of_ripped_edges = int(number_of_nodes * betta)
-                index = np.random.choice(workers, number_of_ripped_edges, replace=False)
-                for i in index:
-                    if i != workers.size - 1:
-                        # разорвать связь
-                        self.connections_matrix[i, i + 1] = 0
-                        self.connections_matrix[i + 1, i] = 0
-                        # добавить новую случайную связь
-                        new_node = np.random.choice(workers[workers != i], 1, replace=False)[0]
-                        self.connections_matrix[i, new_node] = 1
-                        self.connections_matrix[new_node, i] = 1
+                departament_size = 20
+                for k in range(len(workers_total) // departament_size):
+                    if k != len(workers_total) // departament_size - 1:
+                        workers = workers_total[k * departament_size: (k+1) * departament_size]
                     else:
-                        # разорвать связь
-                        self.connections_matrix[0, 0 + 1] = 0
-                        self.connections_matrix[0 + 1, 0] = 0
-                        # добавить новую случайную связь
-                        new_node = np.random.choice(workers[workers != 0], 1, replace=False)[0]
-                        self.connections_matrix[0, new_node] = 1
-                        self.connections_matrix[new_node, 0] = 1
+                        workers = workers_total[k * departament_size: ]
+
+                    # закрепить за этими людьми номер предприятие
+                    self.population.loc[workers, "departament_number"] = j * manufacture_size * k
+
+                    # сделать так, чтобы изначально все workers стоят по кругу и соединены только с соседом
+                    for i in range(len(workers) - 1):
+                        self.connections_matrix[workers[i], workers[i + 1]] = 1
+                        self.connections_matrix[workers[i + 1], workers[i]] = 1
+                    self.connections_matrix[workers[0], workers[-1]] = 1
+                    self.connections_matrix[workers[-1], workers[0]] = 1
+
+                    number_of_ripped_edges = int(departament_size * betta)
+                    index = np.random.choice(workers, number_of_ripped_edges, replace=False)
+                    for i in index:
+                        if i != workers.size - 1:
+                            # разорвать связь
+                            self.connections_matrix[i, i + 1] = 0
+                            self.connections_matrix[i + 1, i] = 0
+                            # добавить новую случайную связь
+                            new_node = np.random.choice(workers[workers != i], 1, replace=False)[0]
+                            self.connections_matrix[i, new_node] = 1
+                            self.connections_matrix[new_node, i] = 1
+                        else:
+                            # разорвать связь
+                            self.connections_matrix[0, 0 + 1] = 0
+                            self.connections_matrix[0 + 1, 0] = 0
+                            # добавить новую случайную связь
+                            new_node = np.random.choice(workers[workers != 0], 1, replace=False)[0]
+                            self.connections_matrix[0, new_node] = 1
+                            self.connections_matrix[new_node, 0] = 1
 
         return 0
 
@@ -1028,10 +1116,36 @@ class MyPopulation:
         plt.show()
         return 0
 
+    """
+    def plot_contact_matrix(self,
+                            population_type: Literal["urban", "rural"] = None) -> int:
+ 
+        if population_type is None:
+            print("Ошибка: Нет матрицы контактов")
+            return 1
+
+        inner_matrix =
+
+        if population_type == "urban":
+            inner_matrix = self.connections_matrix_urban.toarray()
+
+        if population_type == "rural":
+            inner_matrix = self.connections_matrix_rural.toarray()
+
+
+
+
+
+        plt.colorbar()
+        plt.show()
+        return 0
+
+    """
     def _create_connection_inside_university(self,
                                              average_university_size: int,
                                              average_number_of_groups: int,
-                                             weight: int = 30) -> int:
+                                             weight: int = 30,
+                                             betta: float = 0.2) -> int:
 
         average_group_size = int(average_university_size // average_number_of_groups)
         number_of_universities = int(
@@ -1042,18 +1156,49 @@ class MyPopulation:
         # создать словарь с индексами по возрастным категориям
         for i in tqdm(range(number_of_universities)):
             for department in range(average_number_of_groups):
-
+                # выделить тех, кто подходит под характеристики студента
                 ind = self.population.query("(age > 18) & (age < 27) & (university_number == -1)")["id"]
                 students = np.random.choice(ind, min(average_group_size, ind.size), replace=False)
 
                 if not len(students):
                     continue
 
-                # закрепить за этими детьми школу
+                # закрепить за людьми университет
                 self.population.loc[students, "university_number"] = i
 
-                self._add_connections_to_matrix(nodes=students,
-                                                weight=weight)
+                # создать связи между людьми по схеме small-world
+                number_of_nodes = len(students)
+
+                # сделать так, чтобы изначально все студенты стоят по кругу и соединены только с соседом
+                for j in range(len(students) - 1):
+                    self.connections_matrix[students[j], students[j + 1]] = 1
+                    self.connections_matrix[students[j + 1], students[j]] = 1
+                self.connections_matrix[students[0], students[-1]] = 1
+                self.connections_matrix[students[-1], students[0]] = 1
+
+                # определить сколько будет перебрасываний связей
+                number_of_ripped_edges = int(number_of_nodes * betta)
+
+                # выделить студентов, которым будем менять связи
+                index = np.random.choice(students, number_of_ripped_edges, replace=False)
+
+                for j in index:
+                    if j != students.size - 1:
+                        # разорвать связь
+                        self.connections_matrix[j, j + 1] = 0
+                        self.connections_matrix[j + 1, j] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(students[students != j], 1, replace=False)[0]
+                        self.connections_matrix[j, new_node] = 1
+                        self.connections_matrix[new_node, j] = 1
+                    else:
+                        # разорвать связь
+                        self.connections_matrix[0, 0 + 1] = 0
+                        self.connections_matrix[0 + 1, 0] = 0
+                        # добавить новую случайную связь
+                        new_node = np.random.choice(students[students != 0], 1, replace=False)[0]
+                        self.connections_matrix[0, new_node] = 1
+                        self.connections_matrix[new_node, 0] = 1
 
         return 0
 
