@@ -40,6 +40,7 @@ class MyPopulation:
         self.betta_dict = None
         self.mean_weight_beta = None
         self.moment_of_change_dict = None
+        self.beta_inner= None
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -86,7 +87,9 @@ class MyPopulation:
                              use_generated_population_nodes_degrees=False,
                              population_type="urban",
                              plot_single_group: int = -1,
-                             title = "") -> int:
+                             title = "",
+                             save_path: str = "",
+                             ylim: int = -1) -> int:
 
 
         # Система дифференциальных уравнения SIR
@@ -117,13 +120,12 @@ class MyPopulation:
             self.population_nodes_degrees = np.array(self.population_nodes_degrees)
             self.population_nodes_degrees_absolute_values = self.population_nodes_degrees.copy()
 
-            # нормировать степени вершин в диапазон [0, 1]
-            beta_inner = (self.population_nodes_degrees - self.population_nodes_degrees.min()) / \
-                         (self.population_nodes_degrees.max() - self.population_nodes_degrees.min())
+            tmp = np.arange(self.population_nodes_degrees.size)
+            self.beta_inner = (tmp - tmp.min()) / (tmp.max() - tmp.min())
         else:
-            beta_inner = beta
+            self.beta_inner = beta
 
-        self.betta_dict = dict(np.array([np.arange(self.population_nodes_degrees.size), beta_inner]).T)
+        self.betta_dict = dict(np.array([np.arange(self.population_nodes_degrees.size), self.beta_inner]).T)
 
         # получить средневзвешенную бету по всем группам
         self.mean_weight_beta = (np.array(list(self.betta_dict.keys())) * np.array(list(self.betta_dict.values()))) \
@@ -138,7 +140,7 @@ class MyPopulation:
 
         # хотим так же отследить момент на какой день приходится пик заражения
         self.moment_of_change_dict = dict()
-        for i, b in enumerate(beta_inner):
+        for i, b in enumerate(self.beta_inner):
 
             # если нужно нарисовать только один конкретный график для демонстрации
             if plot_single_group != -1 and plot_single_group != i:
@@ -169,6 +171,8 @@ class MyPopulation:
             # запомнить, сколько людей в этой группе болело
             total_ever_was_infected += I.max()
 
+        if ylim != -1:
+            ax.set_ylim(0, ylim)
         ax.set_xlabel('Дни')
         ax.set_ylabel('Количество')
         ax.set_title(title)
@@ -180,6 +184,9 @@ class MyPopulation:
         for spine in ('top', 'right', 'bottom', 'left'):
             ax.spines[spine].set_visible(False)
         plt.show()
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         infected = int(total_ever_was_infected)
         total = self.population_nodes_degrees_absolute_values.sum()
@@ -741,13 +748,13 @@ class MyPopulation:
 
         # создать словарь с индексами по возрастным категориям
         for j in range(number_of_schools):
-            for age in range(7, 18, 1):
+            for age in range(7, 19, 1):
                 # выбрать детей, которые будут ходить в школу
                 # из числа детей, подходящих по возрасту
-                ind = population_inner.query("(age == @age) & (school_number == -1)")["id"]
+                ind = np.array(population_inner.query("(age == @age) & (school_number == -1)")["id"].index)
                 students = np.random.choice(ind, min(average_class_size, ind.size), replace=False)
 
-                if  len(students) <= 1:
+                if len(students) <= 1:
                     continue
 
                 # закрепить за этими детьми школу
@@ -761,24 +768,27 @@ class MyPopulation:
                 self.connections_matrix[students[-1], students[0]] = 1
 
                 number_of_ripped_edges = int(average_class_size * betta)
+
+                # получить индексы студентов, для которых будем менять связи на новые
                 index = np.random.choice(students, min(number_of_ripped_edges, len(students)), replace=False)
-                for i in index:
-                    if i != students.size - 1:
+
+                for i in range(len(index) - 1):
+                    if i != index.size - 1:
                         # разорвать связь
-                        self.connections_matrix[i, i + 1] = 0
-                        self.connections_matrix[i + 1, i] = 0
+                        self.connections_matrix[index[i], index[i + 1]] = 0
+                        self.connections_matrix[index[i + 1], index[i]] = 0
                         # добавить новую случайную связь
-                        new_node = np.random.choice(students[students != i], 1, replace=False)[0]
-                        self.connections_matrix[i, new_node] = 1
-                        self.connections_matrix[new_node, i] = 1
+                        new_node = np.random.choice(index[index != index[i]], 1, replace=False)[0]
+                        self.connections_matrix[index[i], new_node] = 1
+                        self.connections_matrix[new_node, index[i]] = 1
                     else:
                         # разорвать связь
-                        self.connections_matrix[0, 0 + 1] = 0
-                        self.connections_matrix[0 + 1, 0] = 0
+                        self.connections_matrix[index[0], index[-1]] = 0
+                        self.connections_matrix[index[-1], index[0]] = 0
                         # добавить новую случайную связь
-                        new_node = np.random.choice(students[students != 0], 1, replace=False)[0]
-                        self.connections_matrix[0, new_node] = 1
-                        self.connections_matrix[new_node, 0] = 1
+                        new_node = np.random.choice(index[index != index[-1]], 1, replace=False)[0]
+                        self.connections_matrix[index[-1], new_node] = 1
+                        self.connections_matrix[new_node, index[-1]] = 1
 
 
                 #self._add_connections_to_matrix(nodes=students, weight=weight)
@@ -811,7 +821,8 @@ class MyPopulation:
 
         return 0
 
-    def plot_manufactures_connections_graph(self, departament_id: int = -1) -> Literal[0, 1]:
+    def plot_manufactures_connections_graph(self, departament_id: int = -1,
+                                            save_path: str = "") -> Literal[0, 1]:
         """ Функция рисует граф контактов внутри предприятия"""
 
         np.random.seed(self.random_seed)
@@ -828,12 +839,16 @@ class MyPopulation:
         # создать граф
         tmp = self.connections_matrix[ind, :].tocsc()[:, ind].toarray()
 
+        fig = plt.figure()
         np.fill_diagonal(tmp, 0)
         graph = nx.DiGraph(tmp)
         pos = nx.circular_layout(graph)
 
         nx.draw(G=graph, pos=pos)
         plt.show()
+
+        if save_path != "":
+            fig.savefig(save_path)
 
         return 0
 
@@ -996,23 +1011,23 @@ class MyPopulation:
 
                     number_of_ripped_edges = int(departament_size * betta)
                     index = np.random.choice(workers, number_of_ripped_edges, replace=False)
-                    for i in index:
-                        if i != workers.size - 1:
+                    for i in range(len(index) - 1):
+                        if i != index.size - 1:
                             # разорвать связь
-                            self.connections_matrix[i, i + 1] = 0
-                            self.connections_matrix[i + 1, i] = 0
+                            self.connections_matrix[index[i], index[i + 1]] = 0
+                            self.connections_matrix[index[i + 1], index[i]] = 0
                             # добавить новую случайную связь
-                            new_node = np.random.choice(workers[workers != i], 1, replace=False)[0]
-                            self.connections_matrix[i, new_node] = 1
-                            self.connections_matrix[new_node, i] = 1
+                            new_node = np.random.choice(index[index != index[i]], 1, replace=False)[0]
+                            self.connections_matrix[index[i], new_node] = 1
+                            self.connections_matrix[new_node, index[i]] = 1
                         else:
                             # разорвать связь
-                            self.connections_matrix[0, 0 + 1] = 0
-                            self.connections_matrix[0 + 1, 0] = 0
+                            self.connections_matrix[index[0], index[-1]] = 0
+                            self.connections_matrix[index[-1], index[0]] = 0
                             # добавить новую случайную связь
-                            new_node = np.random.choice(workers[workers != 0], 1, replace=False)[0]
-                            self.connections_matrix[0, new_node] = 1
-                            self.connections_matrix[new_node, 0] = 1
+                            new_node = np.random.choice(index[index != index[-1]], 1, replace=False)[0]
+                            self.connections_matrix[index[-1], new_node] = 1
+                            self.connections_matrix[new_node, index[-1]] = 1
 
         return 0
 
@@ -1154,7 +1169,7 @@ class MyPopulation:
         self.population["university_number"] = -1
 
         # создать словарь с индексами по возрастным категориям
-        for i in tqdm(range(number_of_universities)):
+        for k in tqdm(range(number_of_universities)):
             for department in range(average_number_of_groups):
                 # выделить тех, кто подходит под характеристики студента
                 ind = self.population.query("(age > 18) & (age < 27) & (university_number == -1)")["id"]
@@ -1164,7 +1179,7 @@ class MyPopulation:
                     continue
 
                 # закрепить за людьми университет
-                self.population.loc[students, "university_number"] = i
+                self.population.loc[students, "university_number"] = k
 
                 # создать связи между людьми по схеме small-world
                 number_of_nodes = len(students)
@@ -1182,23 +1197,23 @@ class MyPopulation:
                 # выделить студентов, которым будем менять связи
                 index = np.random.choice(students, number_of_ripped_edges, replace=False)
 
-                for j in index:
-                    if j != students.size - 1:
+                for i in range(len(index) - 1):
+                    if i != index.size - 1:
                         # разорвать связь
-                        self.connections_matrix[j, j + 1] = 0
-                        self.connections_matrix[j + 1, j] = 0
+                        self.connections_matrix[index[i], index[i + 1]] = 0
+                        self.connections_matrix[index[i + 1], index[i]] = 0
                         # добавить новую случайную связь
-                        new_node = np.random.choice(students[students != j], 1, replace=False)[0]
-                        self.connections_matrix[j, new_node] = 1
-                        self.connections_matrix[new_node, j] = 1
+                        new_node = np.random.choice(index[index != index[i]], 1, replace=False)[0]
+                        self.connections_matrix[index[i], new_node] = 1
+                        self.connections_matrix[new_node, index[i]] = 1
                     else:
                         # разорвать связь
-                        self.connections_matrix[0, 0 + 1] = 0
-                        self.connections_matrix[0 + 1, 0] = 0
+                        self.connections_matrix[index[0], index[-1]] = 0
+                        self.connections_matrix[index[-1], index[0]] = 0
                         # добавить новую случайную связь
-                        new_node = np.random.choice(students[students != 0], 1, replace=False)[0]
-                        self.connections_matrix[0, new_node] = 1
-                        self.connections_matrix[new_node, 0] = 1
+                        new_node = np.random.choice(index[index != index[-1]], 1, replace=False)[0]
+                        self.connections_matrix[index[-1], new_node] = 1
+                        self.connections_matrix[new_node, index[-1]] = 1
 
         return 0
 
