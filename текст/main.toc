@@ -1,0 +1,18 @@
+\babel@toc {russian}{}
+\contentsline {section}{\numberline {1}Введение}{2}{section.1}%
+\contentsline {section}{\numberline {2}Сетевой подход}{2}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Анализ данных}{4}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Сети передачи}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Использование математических моделей при сетевом анализе}{5}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}SIR модель. Основные понятия}{5}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}SIR модель для сложных сетей}{7}{subsection.2.5}%
+\contentsline {section}{\numberline {3}Сбор и анализ даных}{7}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Численность населения}{8}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Предприятия}{8}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Школы}{10}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Число людей в домохозяйствах}{10}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Алгоритм создания сети контактов}{11}{section.4}%
+\contentsline {section}{\numberline {5}Эксперименты}{17}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Локдаун}{17}{subsection.5.1}%
+\contentsline {section}{\numberline {6}Заключение}{18}{section.6}%
+\contentsline {section}{\numberline {7}Приложения}{19}{section.7}%
