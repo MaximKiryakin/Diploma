@@ -34,7 +34,6 @@ class MyPopulation:
         self.display_status = True
         self.random_seed = random_seed
         self.population_nodes_degrees = None
-        np.random.seed(self.random_seed)
         self.connections_matrix_urban = None
         self.connections_matrix_rural = None
         self.population_nodes_degrees_urban = None
@@ -44,6 +43,8 @@ class MyPopulation:
         self.mean_weight_beta = None
         self.moment_of_change_dict = None
         self.beta_inner= None
+
+        np.random.seed(self.random_seed)
 
     def read_households_distribution_template(self, file_name: str,
                                               input_folder: str = "") -> int:
@@ -293,7 +294,9 @@ class MyPopulation:
                                   largest_manufactures_number: int = 20,
                                   lockdown: bool = False,
                                   use_small_world_approach: bool = False,
-                                  betta: float = 0.2) -> int:
+                                  betta: float = 0.2,
+                                  input_folder: str = "input",
+                                  output_folder: str = "output") -> int:
 
         """ Метод создает популяцию городскую + сельскую """
         print(datetime.datetime.now(), ": Строится популяция для городского населения ... ")
@@ -302,7 +305,9 @@ class MyPopulation:
                                largest_manufactures_number=largest_manufactures_number,
                                lockdown=lockdown,
                                use_small_world_approach=use_small_world_approach,
-                               betta=betta)
+                               betta=betta,
+                               input_folder=input_folder,
+                               output_folder=output_folder)
 
         urban_population_raw = self.population.copy()
         self.connections_matrix_urban = self.connections_matrix.copy()
@@ -315,7 +320,9 @@ class MyPopulation:
                                largest_manufactures_number=largest_manufactures_number,
                                lockdown=lockdown,
                                use_small_world_approach=use_small_world_approach,
-                               betta=betta)
+                               betta=betta,
+                               input_folder=input_folder,
+                               output_folder=output_folder)
 
         rural_population_raw = self.population.copy()
         self.connections_matrix_rural = self.connections_matrix.copy()
@@ -1247,15 +1254,17 @@ class MyPopulation:
                           schools_filename: str = "schools.xlsx",
                           lockdown: bool = False,
                           use_small_world_approach: bool = False,
-                          betta: float = 0.2) -> Literal[0, 1]:
+                          betta: float = 0.2,
+                          input_folder: str = "input",
+                          output_folder: str = "output") -> Literal[0, 1]:
 
         print(datetime.datetime.now(), ": Запуск функции создания популяции ... ")
 
         # считать все необходимые шаблоны для генерации
-        self.read_households_distribution_template(file_name=households_filename)
-        self.read_age_sex_distribution_template(file_name=age_sex_distribution_filename)
-        self.read_manufactures_distribution_template(file_name=manufactures_filename)
-        self.read_schools_distribution_template(file_name=schools_filename)
+        self.read_households_distribution_template(file_name=input_folder + '/' + households_filename)
+        self.read_age_sex_distribution_template(file_name=input_folder + '/' + age_sex_distribution_filename)
+        self.read_manufactures_distribution_template(file_name=input_folder + '/' + manufactures_filename)
+        self.read_schools_distribution_template(file_name=input_folder + '/' + schools_filename)
 
         # посчитать, сколько человек надо на каждый тип домохозяйства
         self._get_household_ratio()
