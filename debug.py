@@ -39,8 +39,8 @@ p.create_population("urban",20000, largest_manufactures_number=12)
 p.plot_total_connections_hist()
 """
 
-population_size = 20000
-model = gr.MyPopulation()
-model.generate_total_population(population_size = population_size,
-                                largest_manufactures_number=13,
-                                lockdown=False)
+population_size = 100000
+model_loc = gr.MyPopulation()
+model_loc.generate_total_population(population_size = population_size,
+                                    largest_manufactures_number=10,
+                                    lockdown=False)
