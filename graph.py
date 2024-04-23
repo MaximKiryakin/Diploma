@@ -382,12 +382,20 @@ class MyPopulation:
         sns.barplot(x='id', y='value', data=tmp_urban, ax=axs[0], color='red')
 
         axs[0].set_title("Городское население", fontdict={'fontsize': 20})
-        axs[0].set_xlabel("Число людей в семье")
-        axs[0].set_ylabel("Количество семей")
+        axs[0].set_xlabel("Число людей в семье", fontdict={'fontsize': 14})
+        axs[0].set_ylabel("Количество семей", fontdict={'fontsize': 14})
+        axs[0].set_xticks(ticks=tmp_urban.index, labels=["1 человек", "2 человека",
+                                                         "3 человека", "4 человека",
+                                                         "5 человек", "Более 6 человек"])
+        axs[0].tick_params(axis='both', labelsize=11)
 
         axs[1].set_title("Сельское население", fontdict={'fontsize': 20})
-        axs[1].set_xlabel("Число людей в семье")
-        axs[1].set_ylabel("Количество семей")
+        axs[1].set_xlabel("Число людей в семье", fontdict={'fontsize': 14})
+        axs[1].set_ylabel("Количество семей", fontdict={'fontsize': 14})
+        axs[1].set_xticks(ticks=tmp_rural.index, labels=["1 человек", "2 человека",
+                                                         "3 человека", "4 человека",
+                                                         "5 человек", "Более 6 человек"])
+        axs[1].tick_params(axis='both', labelsize=11)
 
         if save_path != "":
             fig.savefig(save_path)
@@ -869,7 +877,8 @@ class MyPopulation:
                                     bins: int = 15,
                                     population_type: Literal["urban", "rural"] = None,
                                     display_status=True,
-                                    save_path: str = "") -> Literal[0, 1]:
+                                    save_path: str = "",
+                                    title: str = "") -> Literal[0, 1]:
         """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
 
         if display_status:
@@ -909,10 +918,9 @@ class MyPopulation:
         x = np.repeat(range(len(population_nodes_degrees)), population_nodes_degrees)
         ax.tick_params(axis='both', labelsize=14)
         ax.hist(x, bins=bins)
-        ax.set_xlabel('Степень вершины', fontdict={'fontsize': 16})
-        ax.set_ylabel('Число вершин', fontdict={'fontsize': 16})
-        ax.set_title(f'Гистограмма степеней вершин для {"городского" if population_type == "urban" else "сельского"} населения',
-                  fontdict={'fontsize': 18})
+        ax.set_xlabel('Степень вершины', fontdict={'fontsize': 14})
+        ax.set_ylabel('Число вершин', fontdict={'fontsize': 14})
+        ax.set_title(title, fontdict={'fontsize': 20})
         plt.show()
 
         if save_path != "":
