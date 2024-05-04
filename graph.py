@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from scipy.integrate import odeint
 import matplotlib.cm as cm
 from matplotlib import colors
-from scipy import stats
+from scipy import integrate
 
 
 
@@ -43,6 +43,7 @@ class MyPopulation:
         self.mean_weight_beta = None
         self.moment_of_change_dict = None
         self.beta_inner= None
+        self.solution = None
 
         np.random.seed(self.random_seed)
 
@@ -77,6 +78,102 @@ class MyPopulation:
 
         return 0
 
+    def calc_sir_model(self,
+                       population_type: Literal["urban", "rural"],
+                       gamma: float,
+                       beta0: float,
+                       t_end: int,
+                       n_steps: int,
+                       t_start: int = 0) -> int:
+
+
+        # вычислить значения бета
+        nd = self.population_nodes_degrees_urban if population_type == "rural" else self.population_nodes_degrees_rural
+        tmp = np.arange(nd.size)
+        self.beta_normalized = (tmp - tmp.min()) / (tmp.max() - tmp.min())
+
+
+        # вычислить число групп
+        num_age_groups = self.beta_normalized.size
+        print("self.beta_normalized",self.beta_normalized )
+
+        initial_infected = np.ones(num_age_groups)
+
+        # начальные условия (S0, I0, R0) для каждой группы
+        initial_conditions = np.ones(3 * num_age_groups)
+
+        for i in range(num_age_groups):
+            initial_conditions[i * 3] = nd[i] - initial_infected[i]   # Susceptible
+            initial_conditions[i * 3 + 1] = initial_infected[i]     # Infected
+            initial_conditions[i * 3 + 2] = 0                       # Recovered
+
+        def _sir_model(t, y, beta, gamma, num_age_groups, beta0):
+            dydt = np.zeros_like(y)
+
+            for i in range(num_age_groups):
+                S = y[i * 3]
+                I = y[i * 3 + 1]
+                R = y[i * 3 + 2]
+
+                dSdt = -beta0 * S * (i + 1) * np.sum(
+                    [(i + 1) * beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
+                    [(i + 1) * beta[i] for i in range(num_age_groups)])
+                dIdt = beta0 * S * (i + 1) * np.sum(
+                    [(i + 1) * beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
+                    [(i + 1) * beta[i] for i in range(num_age_groups)]) - gamma * I
+                dRdt = gamma * I
+
+                dydt[i * 3] = dSdt
+                dydt[i * 3 + 1] = dIdt
+                dydt[i * 3 + 2] = dRdt
+
+            return dydt
+
+        # временная сетка для решения диффура
+        t = np.linspace(t_start, t_end, n_steps)
+
+        # численно решить диффур
+        self.solution = integrate.solve_ivp(_sir_model, [t[0], t[-1]], initial_conditions,
+                                            t_eval=t, args=(self.beta_normalized, gamma, num_age_groups, beta0)).y.T
+
+        return 0
+
+    def plot_sir_model(self,
+                       t_end: int,
+                       n_steps: int,
+                       t_start: int = 0,
+                       plot_s: bool = True,         # рисовать ли кривую для восприимчивых
+                       plot_i: bool = True,         # рисовать ли кривую для инфицированных
+                       plot_r: bool = True,         # рисовать ли кривую для выздоровевших
+                       title: str = "",
+                       save_path: str = "",
+                       use_label: bool = True,
+                       ylim: int = -1) -> int:
+
+        # вычислить число компартментов
+        num_age_groups = self.solution.shape[1] // 3
+        time_linspace = np.linspace(t_start, t_end, n_steps)
+        plt.figure(figsize=(12, 6))
+
+        for i in range(num_age_groups):
+            if plot_s:
+                plt.plot(time_linspace, self.solution[:, i * 3], label=f'Age Group {i + 1} - Susceptible')
+            if plot_i:
+                plt.plot(time_linspace, self.solution[:, i * 3 + 1], label=f'Age Group {i + 1} - Infected')
+            if plot_r:
+                plt.plot(time_linspace, self.solution[:, i * 3 + 2], label=f'Age Group {i + 1} - Recovered')
+
+        plt.xlabel('Time')
+        plt.ylabel('Number of Individuals')
+        plt.title(title)
+        plt.legend()
+        plt.show()
+
+
+        return 0
+
+
+
     def plot_sir_model_curve(self,
                              population_size: int = 1000,
                              beta: np.ndarray = np.array([0.2]),  # коэффициент контактов [0, 1]
@@ -97,10 +194,10 @@ class MyPopulation:
                              ylim: int = -1) -> int:
 
         # Система дифференциальных уравнения SIR
-        def deriv(y, t, N, beta, beta_0,  gamma):
+        def deriv(y, t, N, beta, beta_0,  gamma, i):
             S, I, R = y
-            dSdt = -beta_0 * beta * S * I / N
-            dIdt = beta_0 * beta * S * I / N - gamma * I
+            dSdt = -beta_0 * beta[i] * S * I / N
+            dIdt = beta_0 * beta[i] * S * I / N - gamma * I
             dRdt = gamma * I
             return dSdt, dIdt, dRdt
 
@@ -124,7 +221,7 @@ class MyPopulation:
                 np.fill_diagonal(tmp, 0)
 
                 # создать граф для выбранных людей и рассчитать степени вершин
-                graph = nx.DiGraph(tmp)
+                graph = nx.Graph(tmp)
                 population_nodes_degrees = nx.degree_histogram(graph)
 
             population_nodes_degrees = np.array(population_nodes_degrees)
@@ -148,16 +245,20 @@ class MyPopulation:
 
         t = np.linspace(0, n_days, n_days)
 
-        # создание цветовой палитры для colormap
-        norm = colors.Normalize(vmin=(self.population_nodes_degrees_absolute_values * self.beta_inner).min(),
-                                vmax=(self.population_nodes_degrees_absolute_values * self.beta_inner).max())
-        cmap = cm.viridis
+        cmap = plt.get_cmap('jet', np.unique(self.beta_inner).size)
 
         # хотим так же отследить момент на какой день приходится пик заражения
         self.moment_of_change_dict = dict()
         # хотим отследить длительность вспышки
         max_infection_duration = 0
+        ticks = []
+
+        # Normalizer
+        norm = colors.Normalize(vmin=0,
+                                vmax=self.beta_inner.size)
+
         for i, b in enumerate(self.beta_inner):
+
 
             # если нужно нарисовать только один конкретный график для демонстрации
             if plot_single_group != -1 and plot_single_group != i:
@@ -175,31 +276,44 @@ class MyPopulation:
             if group_size == 0:
                 continue
 
+            ticks.append(i)
             # решить систему ОДУ для модели SIR
-            S, I, R = odeint(deriv, y0, t, args=(group_size, b, beta_0, gamma)).T
+            S, I, R = odeint(deriv, y0, t, args=(group_size, self.beta_inner, beta_0, gamma, i)).T
 
             self.moment_of_change_dict[i] = np.argmax(I)
             if np.where(I > 0.9)[0][-1] > max_infection_duration:
                 max_infection_duration = np.where(I > 0.9)[0][-1]
 
             if plot_s:
-                ax.plot(t, S, alpha=0.5, lw=2,  color=cmap(norm(b * group_size)),
+                ax.plot(t, S, alpha=0.5,  c=cmap(norm(i)),
                         label='Susceptible' if (i == 0 or plot_single_group != -1) and use_label else None)
             if plot_i:
-                ax.plot(t, I,  color=cmap(norm(b * group_size)), alpha=0.5, lw=2,
+                ax.plot(t, I, alpha=0.5, c=cmap(norm(i)),
                         label='Infected' if (i == 0 or plot_single_group != -1) and use_label else None)
             if plot_r:
-                ax.plot(t, R,  color=cmap(norm(b * group_size)), alpha=0.5, lw=2,
+                ax.plot(t, R,   alpha=0.5, c=cmap(norm(i)),
                         label='Recovered' if (i == 0 or plot_single_group != -1) and use_label else None)
 
             # запомнить, сколько людей в этой группе болело
             total_ever_was_infected += I.max()
 
+
+        # creating ScalarMappable
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label('$beta$')
 
+        plt.colorbar(sm)
+
+        plt.show()
+
+        #sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        #sm.set_array([])
+        #plt.colorbar(sm)
+        #cbar = plt.colorbar(sm, ax=ax)
+        #cbar.set_label('$beta$')
+        #plt.colorbar(ax=ax)
+
+        """
         if ylim != -1:
             ax.set_ylim(0, ylim)
         ax.set_xlabel('Дни')
@@ -213,6 +327,7 @@ class MyPopulation:
             legend.get_frame().set_alpha(0.5)
         for spine in ('top', 'right', 'bottom', 'left'):
             ax.spines[spine].set_visible(False)
+        plt.legend()
         plt.show()
 
         if save_path != "":
@@ -225,13 +340,13 @@ class MyPopulation:
         group_size = population_nodes_degrees[list(self.moment_of_change_dict.keys())]
         moment_of_change = list(self.moment_of_change_dict.values())
         mean_weight_moment_of_chage = (np.array(group_size) * np.array(moment_of_change)).sum() // group_size.sum()
-
+    
         if plot_single_group == -1:
             print("--- Основная статистика ---")
             print(f"Всего было заражено {infected} людей из {total} ({np.round(infected / total * 100, 2)}%)")
             print("пик заражения по группам", mean_weight_moment_of_chage)
             print("Длительность ", max_infection_duration)
-
+        """
         return 0
 
     def plot_households_distribution(self,
@@ -350,6 +465,11 @@ class MyPopulation:
                                 '60 – 64', '65 – 69', '70 лет и более'], :].reset_index()
 
         self.population_total_grouped = population_predicted
+
+        # сформировать степени вершин для городского и сельского населений
+        self.population_nodes_degrees_urban = np.array(nx.degree_histogram(nx.Graph(self.connections_matrix_urban.toarray())))
+        self.population_nodes_degrees_rural = np.array(nx.degree_histogram(nx.Graph(self.connections_matrix_rural.toarray())))
+
         return 0
 
     def plot_households_distribution_generated_population(self,
@@ -912,7 +1032,7 @@ class MyPopulation:
         if display_status:
             print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
 
-        graph = nx.DiGraph(matrix_inner)
+        graph = nx.Graph(matrix_inner)
 
         if population_type == "urban":
             self.population_nodes_degrees_urban = nx.degree_histogram(graph)
@@ -922,9 +1042,9 @@ class MyPopulation:
 
         # нарисовать гистограмму
         fig, ax = plt.subplots(figsize=(10, 10))
-        x = np.repeat(range(len(population_nodes_degrees)), population_nodes_degrees)
+        tmp = pd.DataFrame(population_nodes_degrees, columns=["tmp"]).reset_index()
+        sns.barplot(x='index', y='tmp', data=tmp, ax=ax, color='red')
         ax.tick_params(axis='both', labelsize=14)
-        ax.hist(x, bins=bins)
         ax.set_xlabel('Степень вершины', fontdict={'fontsize': 14})
         ax.set_ylabel('Число вершин', fontdict={'fontsize': 14})
         ax.set_title(title, fontdict={'fontsize': 20})
