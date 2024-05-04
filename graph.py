@@ -36,6 +36,7 @@ class MyPopulation:
         self.population_nodes_degrees = None
         self.connections_matrix_urban = None
         self.connections_matrix_rural = None
+        self.connections_matrix = None
         self.population_nodes_degrees_urban = None
         self.population_nodes_degrees_rural = None
         self.population_nodes_degrees_absolute_values = None
@@ -44,6 +45,11 @@ class MyPopulation:
         self.moment_of_change_dict = None
         self.beta_inner= None
         self.solution = None
+        self.beta_normalized = None
+        self.time_linspace = None
+        self.sir_model_population_type = None
+        self.time_start = None
+        self.time_end = None
 
         np.random.seed(self.random_seed)
 
@@ -84,28 +90,36 @@ class MyPopulation:
                        beta0: float,
                        t_end: int,
                        n_steps: int,
-                       t_start: int = 0) -> int:
+                       t_start: int = 0,
+                       one_group_mode: bool = False) -> int:
+        """ Метод решает систему дифференциальных уравнений для SIR модели """
 
+        # 0. запомнить, для какого типа популяции делаем расчет
+        self.sir_model_population_type = population_type
 
-        # вычислить значения бета
-        nd = self.population_nodes_degrees_urban if population_type == "rural" else self.population_nodes_degrees_rural
+        # 1. вычислить значения бета и нормировать из в интервал [0, 1]
+        nd = self.population_nodes_degrees_urban if population_type == "urban" else self.population_nodes_degrees_rural
         tmp = np.arange(nd.size)
+
+        # 1.1 если задан режим без учета групп, положить число групп равным среднему по нормированным бета
         self.beta_normalized = (tmp - tmp.min()) / (tmp.max() - tmp.min())
+        if one_group_mode:
+            self.beta_normalized = np.array([self.beta_normalized.mean()])
 
-
-        # вычислить число групп
+        # 2. вычислить число компартментов
         num_age_groups = self.beta_normalized.size
-        print("self.beta_normalized",self.beta_normalized )
 
+        # 3. инициализировать число инфицированных в каждой группе единицами
         initial_infected = np.ones(num_age_groups)
 
-        # начальные условия (S0, I0, R0) для каждой группы
+        # 4. задать начальные условия (S0, I0, R0) для каждого компартмента
         initial_conditions = np.ones(3 * num_age_groups)
 
         for i in range(num_age_groups):
-            initial_conditions[i * 3] = nd[i] - initial_infected[i]   # Susceptible
-            initial_conditions[i * 3 + 1] = initial_infected[i]     # Infected
-            initial_conditions[i * 3 + 2] = 0                       # Recovered
+            group_size = nd[i] if not one_group_mode else nd.sum()
+            initial_conditions[i * 3] = group_size - initial_infected[i]   # Susceptible
+            initial_conditions[i * 3 + 1] = initial_infected[i]            # Infected
+            initial_conditions[i * 3 + 2] = 0                              # Recovered
 
         def _sir_model(t, y, beta, gamma, num_age_groups, beta0):
             dydt = np.zeros_like(y)
@@ -115,6 +129,7 @@ class MyPopulation:
                 I = y[i * 3 + 1]
                 R = y[i * 3 + 2]
 
+                """
                 dSdt = -beta0 * S * (i + 1) * np.sum(
                     [(i + 1) * beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
                     [(i + 1) * beta[i] for i in range(num_age_groups)])
@@ -122,6 +137,15 @@ class MyPopulation:
                     [(i + 1) * beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
                     [(i + 1) * beta[i] for i in range(num_age_groups)]) - gamma * I
                 dRdt = gamma * I
+                """
+                dSdt = -beta0 * S * np.sum(
+                    [beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
+                    [beta[i] for i in range(num_age_groups)])
+                dIdt = beta0 * S * np.sum(
+                    [beta[i] * y[i * 3 + 1] for i in range(num_age_groups)]) // np.sum(
+                    [beta[i] for i in range(num_age_groups)]) - gamma * I
+                dRdt = gamma * I
+
 
                 dydt[i * 3] = dSdt
                 dydt[i * 3 + 1] = dIdt
@@ -129,50 +153,125 @@ class MyPopulation:
 
             return dydt
 
-        # временная сетка для решения диффура
-        t = np.linspace(t_start, t_end, n_steps)
+        # 5. создать временную сетку на которой решается дифференциальное уравнение
+        self.time_linspace = np.linspace(t_start, t_end, n_steps)
+        self.time_start = t_start
+        self.time_end = t_end
 
-        # численно решить диффур
-        self.solution = integrate.solve_ivp(_sir_model, [t[0], t[-1]], initial_conditions,
-                                            t_eval=t, args=(self.beta_normalized, gamma, num_age_groups, beta0)).y.T
+        # 6. численно решить дифференциальное уравнение
+        self.solution = integrate.solve_ivp(_sir_model, [self.time_linspace[0], self.time_linspace[-1]],
+                                            initial_conditions, t_eval=self.time_linspace,
+                                            args=(self.beta_normalized, gamma, num_age_groups, beta0)).y.T
 
         return 0
 
     def plot_sir_model(self,
-                       t_end: int,
-                       n_steps: int,
-                       t_start: int = 0,
-                       plot_s: bool = True,         # рисовать ли кривую для восприимчивых
-                       plot_i: bool = True,         # рисовать ли кривую для инфицированных
-                       plot_r: bool = True,         # рисовать ли кривую для выздоровевших
-                       title: str = "",
-                       save_path: str = "",
-                       use_label: bool = True,
+                       plot_s: bool = False,         # рисовать ли кривую для восприимчивых
+                       plot_i: bool = False,         # рисовать ли кривую для инфицированных
+                       plot_r: bool = False,         # рисовать ли кривую для выздоровевших
+                       title: str = "",              # заголовок графика
+                       xlabel: str = "",             # подпись по оси х
+                       ylabel: str = "",             # подпись по оси y
+                       save_path: str = "",          # путь, по которому сохранить график
                        ylim: int = -1) -> int:
 
-        # вычислить число компартментов
-        num_age_groups = self.solution.shape[1] // 3
-        time_linspace = np.linspace(t_start, t_end, n_steps)
-        plt.figure(figsize=(12, 6))
+        """ Метод рисует график для SIR модели, по заранее посчитанному вектору-решению """
+
+        # 1. вычислить число компартментов
+        num_age_groups = self.beta_normalized.size
+
+        # 2. нарисовать графики
+        plt.figure(figsize=(8, 8))
+        fig, axs = plt.subplots(figsize=(8, 8))
+
+        # 2.1 задать шкалы для colorbar по номеру группы
+        norm = colors.Normalize(vmin=0,
+                                vmax=num_age_groups)
+
+        cmap = plt.get_cmap('Dark2', num_age_groups)
+
+        if self.sir_model_population_type == "urban":
+            tmp = self.population_nodes_degrees_urban
+        else:
+            tmp = self.population_nodes_degrees_rural
 
         for i in range(num_age_groups):
             if plot_s:
-                plt.plot(time_linspace, self.solution[:, i * 3], label=f'Age Group {i + 1} - Susceptible')
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Susceptible"
+                plt.plot(self.time_linspace, self.solution[:, i * 3], c=cmap(norm(i)),
+                         label=label)
             if plot_i:
-                plt.plot(time_linspace, self.solution[:, i * 3 + 1], label=f'Age Group {i + 1} - Infected')
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Infectious"
+                plt.plot(self.time_linspace, self.solution[:, i * 3 + 1], c=cmap(norm(i)),
+                         label=label)
             if plot_r:
-                plt.plot(time_linspace, self.solution[:, i * 3 + 2], label=f'Age Group {i + 1} - Recovered')
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Recovered"
+                plt.plot(self.time_linspace, self.solution[:, i * 3 + 2], c=cmap(norm(i)),
+                         label=label)
 
-        plt.xlabel('Time')
-        plt.ylabel('Number of Individuals')
-        plt.title(title)
+        axs.set_xlabel(xlabel, fontdict={'fontsize': 14})
+        axs.set_ylabel(ylabel, fontdict={'fontsize': 14})
+        axs.set_title(title, fontdict={'fontsize': 14})
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+
+        # 2.2 рисуем colorbar только если не идет моделирование с одной группой
+        if num_age_groups > 1:
+            plt.colorbar(sm)
         plt.legend()
         plt.show()
 
+        if save_path != "":
+            fig.savefig(save_path)
 
         return 0
 
+    def calc_main_statistics(self):
+        """ Метод считает статистику по решенному дифференциальному уравнению """
 
+        # 1. вычислить число компартментов
+        num_age_groups = self.beta_normalized.size
+
+        def _convert_linspace_to_days(linspace_period):
+            return linspace_period * self.time_end // self.time_linspace.size
+
+        infected_number, infection_moment_of_change, duration = {}, {}, {}
+        duration_threshold = 0.5
+        for i in range(1, num_age_groups):
+            # запомнить для каждого компартмента максимальное число зараженных
+            infected_number[i] = self.solution[:, i * 3 + 1].max()
+            # запомнить для каждого компартмента день, в который начался спад заражений
+            infection_moment_of_change[i] = _convert_linspace_to_days(self.solution[:, i * 3 + 1].argmax())
+            # запомнить для каждого компартмента, сколько дней длилась инфекция
+            duration[i] = _convert_linspace_to_days(np.where(self.solution[:, i * 3 + 1] > duration_threshold)[0][-1])
+
+        if self.sir_model_population_type == "urban":
+            compartment_sizes = self.population_nodes_degrees_urban[1:]
+        else:
+            compartment_sizes = self.population_nodes_degrees_rural[1:]
+
+        tmp = pd.DataFrame(np.array([np.array([*infected_number.keys()]), np.array([*infected_number.values()])]))
+        tmp = pd.concat([tmp, pd.DataFrame([np.array([*duration.values()])])])
+        tmp = pd.concat([tmp, pd.DataFrame([compartment_sizes])])
+        tmp = pd.concat([tmp, pd.DataFrame([np.array([*infection_moment_of_change.values()])])])
+        tmp.index = ["Число контактов  группы", "Максимальное число  инфицированных",
+                     "Длительность  вспышки", "Размер  компартмента",
+                     "Число дней, через которое начался спад заражений"]
+
+        # 3. рассчитать агрегированные метрики
+        # 3.1 Рассчитать средневзвешенную по размерам групп продолжительность вспышки
+        tmp["Продолжительность (ср.взвш)"] = \
+            np.sum(tmp.loc["Длительность  вспышки", :] * tmp.loc["Размер  компартмента", :]) \
+            / np.sum(tmp.loc["Размер  компартмента", :])
+
+        # 3.2 Рассчитать, сколько всего людей переболело
+        tmp["Общее число переболевших"] = int(np.sum(tmp.loc["Максимальное число  инфицированных", :][:-1]))
+
+        # 3.3 Рассчитать, сколько процентов людей переболело
+        tmp["Процент переболевших"] = tmp["Общее число переболевших"] / compartment_sizes.sum() * 100
+
+        return tmp
 
     def plot_sir_model_curve(self,
                              population_size: int = 1000,
@@ -304,16 +403,6 @@ class MyPopulation:
 
         plt.colorbar(sm)
 
-        plt.show()
-
-        #sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        #sm.set_array([])
-        #plt.colorbar(sm)
-        #cbar = plt.colorbar(sm, ax=ax)
-        #cbar.set_label('$beta$')
-        #plt.colorbar(ax=ax)
-
-        """
         if ylim != -1:
             ax.set_ylim(0, ylim)
         ax.set_xlabel('Дни')
@@ -327,8 +416,6 @@ class MyPopulation:
             legend.get_frame().set_alpha(0.5)
         for spine in ('top', 'right', 'bottom', 'left'):
             ax.spines[spine].set_visible(False)
-        plt.legend()
-        plt.show()
 
         if save_path != "":
             fig.savefig(save_path)
@@ -340,13 +427,13 @@ class MyPopulation:
         group_size = population_nodes_degrees[list(self.moment_of_change_dict.keys())]
         moment_of_change = list(self.moment_of_change_dict.values())
         mean_weight_moment_of_chage = (np.array(group_size) * np.array(moment_of_change)).sum() // group_size.sum()
-    
+        plt.show()
         if plot_single_group == -1:
             print("--- Основная статистика ---")
             print(f"Всего было заражено {infected} людей из {total} ({np.round(infected / total * 100, 2)}%)")
             print("пик заражения по группам", mean_weight_moment_of_chage)
             print("Длительность ", max_infection_duration)
-        """
+
         return 0
 
     def plot_households_distribution(self,
@@ -409,17 +496,23 @@ class MyPopulation:
                                   largest_manufactures_number: int = 20,
                                   lockdown: bool = False,
                                   use_small_world_approach: bool = False,
+                                  use_random_connections_approach: bool = False,
+                                  random_connections_constant: float = 0.3,
                                   betta: float = 0.2,
                                   input_folder: str = "input",
                                   output_folder: str = "output") -> int:
 
-        """ Метод создает популяцию городскую + сельскую """
+        """ Метод создает городскую и сельскую популяции """
+
+        # 1. создание городской популяции
         print(datetime.datetime.now(), ": Строится популяция для городского населения ... ")
         self.create_population(population_type="urban",
                                population_size=(population_size // 2),
                                largest_manufactures_number=largest_manufactures_number,
                                lockdown=lockdown,
                                use_small_world_approach=use_small_world_approach,
+                               use_random_connections_approach=use_random_connections_approach,
+                               random_connections_constant=random_connections_constant,
                                betta=betta,
                                input_folder=input_folder,
                                output_folder=output_folder)
@@ -429,12 +522,15 @@ class MyPopulation:
         urban_population = self.population.groupby(["age_group", "sex", "population_type"],
                                                    as_index=False).count()
 
+        # 2. создание сельской популяции
         print(datetime.datetime.now(), ": Строится популяция для сельского населения ... ")
         self.create_population(population_type="rural",
                                population_size=(population_size // 2),
                                largest_manufactures_number=largest_manufactures_number,
                                lockdown=lockdown,
                                use_small_world_approach=use_small_world_approach,
+                               use_random_connections_approach=use_random_connections_approach,
+                               random_connections_constant=random_connections_constant,
                                betta=betta,
                                input_folder=input_folder,
                                output_folder=output_folder)
@@ -444,6 +540,7 @@ class MyPopulation:
         rural_population = self.population.groupby(["age_group", "sex", "population_type"],
                                                    as_index=False).count()
 
+        # 3. соединение городской и сельской популяций в одну
         self.population_total = pd.concat([urban_population_raw, rural_population_raw])
 
         population_predicted = urban_population.query("sex == 'man'")[["age_group", "id"]] \
@@ -466,9 +563,14 @@ class MyPopulation:
 
         self.population_total_grouped = population_predicted
 
-        # сформировать степени вершин для городского и сельского населений
-        self.population_nodes_degrees_urban = np.array(nx.degree_histogram(nx.Graph(self.connections_matrix_urban.toarray())))
-        self.population_nodes_degrees_rural = np.array(nx.degree_histogram(nx.Graph(self.connections_matrix_rural.toarray())))
+        # 4. формирование степеней вершин для городского и сельского населений
+        tmp = self.connections_matrix_urban.toarray()
+        np.fill_diagonal(tmp, 0)
+        self.population_nodes_degrees_urban = np.array(nx.degree_histogram(nx.Graph(tmp)))
+
+        tmp = self.connections_matrix_rural.toarray()
+        np.fill_diagonal(tmp, 0)
+        self.population_nodes_degrees_rural = np.array(nx.degree_histogram(nx.Graph(tmp)))
 
         return 0
 
@@ -1001,15 +1103,10 @@ class MyPopulation:
         return 0
 
     def plot_total_connections_hist(self,
-                                    bins: int = 15,
                                     population_type: Literal["urban", "rural"] = None,
-                                    display_status=True,
                                     save_path: str = "",
                                     title: str = "") -> Literal[0, 1]:
         """ Нарисовать гистограмму распределения степеней вершин для всего графа"""
-
-        if display_status:
-            print(datetime.datetime.now(), ": Создается граф по матрице контактов ... ")
 
         if population_type is None:
             print("Ошибка: Нет матрицы контактов")
@@ -1019,35 +1116,17 @@ class MyPopulation:
             print("Ошибка: Недопустимый тип популяции")
             return 1
 
-        matrix_inner = None
-        if population_type == "urban":
-            matrix_inner = self.connections_matrix_urban.toarray()
-
-        if population_type == "rural":
-            matrix_inner = self.connections_matrix_rural.toarray()
-
-        # исключить контакты людей самих с собой
-        np.fill_diagonal(matrix_inner, 0)
-
-        if display_status:
-            print(datetime.datetime.now(), ": Вычисление степеней вершин для матрицы контактов ... ")
-
-        graph = nx.Graph(matrix_inner)
-
-        if population_type == "urban":
-            self.population_nodes_degrees_urban = nx.degree_histogram(graph)
-        if population_type == "rural":
-            self.population_nodes_degrees_rural = nx.degree_histogram(graph)
-        population_nodes_degrees = nx.degree_histogram(graph)
-
-        # нарисовать гистограмму
+        # 1. нарисовать гистограмму распределения степеней вершин для заданной популяции
         fig, ax = plt.subplots(figsize=(10, 10))
-        tmp = pd.DataFrame(population_nodes_degrees, columns=["tmp"]).reset_index()
+        tmp = pd.DataFrame(self.population_nodes_degrees_urban if population_type == "urban"
+                           else self.population_nodes_degrees_rural, columns=["tmp"]).reset_index()
         sns.barplot(x='index', y='tmp', data=tmp, ax=ax, color='red')
+
         ax.tick_params(axis='both', labelsize=14)
         ax.set_xlabel('Степень вершины', fontdict={'fontsize': 14})
         ax.set_ylabel('Число вершин', fontdict={'fontsize': 14})
         ax.set_title(title, fontdict={'fontsize': 20})
+
         plt.show()
 
         if save_path != "":
@@ -1374,6 +1453,8 @@ class MyPopulation:
                           schools_filename: str = "schools.xlsx",
                           lockdown: bool = False,
                           use_small_world_approach: bool = False,
+                          use_random_connections_approach: bool = False,
+                          random_connections_constant: float = 0.3,
                           betta: float = 0.2,
                           input_folder: str = "input",
                           output_folder: str = "output") -> Literal[0, 1]:
@@ -1448,8 +1529,17 @@ class MyPopulation:
         # если задано условие моделирования в режиме small-world. При этом подходе внутри популяции
         # просто создаются контакты без разбивки на предприятия, домохозяйства, школы и университеты
         if use_small_world_approach:
+            print(datetime.datetime.now(), ": Строится случайный граф по модели small-world ... ")
             self.population = self.population.reset_index(drop=True).reset_index().rename(columns={"index": "id"})
             self._create_small_world_connections(ind=np.array(self.population["id"].index), betta=betta)
+            return 0
+
+        if use_random_connections_approach:
+            print(datetime.datetime.now(), ": Строится случайный граф Эрдёша-Реньи ... ")
+            # cоздание случайного графа Эрдёша-Реньи
+            self.connections_matrix = nx.to_scipy_sparse_array(nx.erdos_renyi_graph(population_size,
+                                                                                    random_connections_constant),
+                                                               format='lil')
             return 0
 
         # 2.1 разбить полученную популяцию на домохозяйства
