@@ -146,7 +146,6 @@ class MyPopulation:
                     [beta[i] for i in range(num_age_groups)]) - gamma * I
                 dRdt = gamma * I
 
-
                 dydt[i * 3] = dSdt
                 dydt[i * 3 + 1] = dIdt
                 dydt[i * 3 + 2] = dRdt
@@ -181,49 +180,56 @@ class MyPopulation:
         num_age_groups = self.beta_normalized.size
 
         # 2. нарисовать графики
-        plt.figure(figsize=(8, 8))
-        fig, axs = plt.subplots(figsize=(8, 8))
+        plt.figure(figsize=(10, 10))
+        fig, axs = plt.subplots(figsize=(10, 10))
 
         # 2.1 задать шкалы для colorbar по номеру группы
         norm = colors.Normalize(vmin=0,
-                                vmax=num_age_groups)
+                                vmax=num_age_groups - 1 if num_age_groups > 1 else num_age_groups + 2)
 
-        cmap = plt.get_cmap('Dark2', num_age_groups)
+        cmap = plt.get_cmap('tab20', num_age_groups - 1 if num_age_groups > 1 else num_age_groups + 2 )
 
         if self.sir_model_population_type == "urban":
             tmp = self.population_nodes_degrees_urban
         else:
             tmp = self.population_nodes_degrees_rural
 
-        for i in range(num_age_groups):
+        for i in range(1 if num_age_groups > 1 else 0, num_age_groups):
             if plot_s:
-                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Susceptible"
-                plt.plot(self.time_linspace, self.solution[:, i * 3], c=cmap(norm(i)),
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Восприимчивые"
+                plt.plot(self.time_linspace, self.solution[:, i * 3], c=cmap(norm(i if num_age_groups > 1 else i + 0)),
                          label=label)
             if plot_i:
-                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Infectious"
-                plt.plot(self.time_linspace, self.solution[:, i * 3 + 1], c=cmap(norm(i)),
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Инфицированные"
+                plt.plot(self.time_linspace, self.solution[:, i * 3 + 1], c=cmap(norm(i if num_age_groups > 1 else i + 1)),
                          label=label)
             if plot_r:
-                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Recovered"
-                plt.plot(self.time_linspace, self.solution[:, i * 3 + 2], c=cmap(norm(i)),
+                label = f"Контакты: {i}, размер: {tmp[i]}" if num_age_groups > 1 else "Выздоровевшие"
+                plt.plot(self.time_linspace, self.solution[:, i * 3 + 2], c=cmap(norm(i if num_age_groups > 1 else i + 2)),
                          label=label)
 
-        axs.set_xlabel(xlabel, fontdict={'fontsize': 14})
-        axs.set_ylabel(ylabel, fontdict={'fontsize': 14})
-        axs.set_title(title, fontdict={'fontsize': 14})
+        axs.set_xlabel(xlabel, fontdict={'fontsize': 18})
+        axs.set_ylabel(ylabel, fontdict={'fontsize': 18})
+        axs.set_title(title, fontdict={'fontsize': 18})
+
+        if ylim != -1:
+            axs.set_ylim(0, ylim)
 
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
         # 2.2 рисуем colorbar только если не идет моделирование с одной группой
         if num_age_groups > 1:
-            plt.colorbar(sm)
+            cbar = plt.colorbar(sm, label="Номер компартмента", ax = axs)
+            cbar.set_ticks(0 + (np.arange(1, num_age_groups) - 0.5))
+            cbar.set_ticklabels(list(range(1, num_age_groups)))
+            #cbar.set_ticks(0 + (np.arange(num_age_groups) + 0.5))
+            #cbar.set_ticklabels(list(range(num_age_groups)))
         plt.legend()
         plt.show()
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -238,7 +244,7 @@ class MyPopulation:
 
         infected_number, infection_moment_of_change, duration = {}, {}, {}
         duration_threshold = 0.5
-        for i in range(1, num_age_groups):
+        for i in range(1 if num_age_groups > 1 else 0, num_age_groups):
             # запомнить для каждого компартмента максимальное число зараженных
             infected_number[i] = self.solution[:, i * 3 + 1].max()
             # запомнить для каждого компартмента день, в который начался спад заражений
@@ -247,13 +253,13 @@ class MyPopulation:
             duration[i] = _convert_linspace_to_days(np.where(self.solution[:, i * 3 + 1] > duration_threshold)[0][-1])
 
         if self.sir_model_population_type == "urban":
-            compartment_sizes = self.population_nodes_degrees_urban[1:]
+            compartment_sizes = self.population_nodes_degrees_urban
         else:
-            compartment_sizes = self.population_nodes_degrees_rural[1:]
+            compartment_sizes = self.population_nodes_degrees_rural
 
         tmp = pd.DataFrame(np.array([np.array([*infected_number.keys()]), np.array([*infected_number.values()])]))
         tmp = pd.concat([tmp, pd.DataFrame([np.array([*duration.values()])])])
-        tmp = pd.concat([tmp, pd.DataFrame([compartment_sizes])])
+        tmp = pd.concat([tmp, pd.DataFrame([compartment_sizes[1:]])])
         tmp = pd.concat([tmp, pd.DataFrame([np.array([*infection_moment_of_change.values()])])])
         tmp.index = ["Число контактов  группы", "Максимальное число  инфицированных",
                      "Длительность  вспышки", "Размер  компартмента",
@@ -269,7 +275,12 @@ class MyPopulation:
         tmp["Общее число переболевших"] = int(np.sum(tmp.loc["Максимальное число  инфицированных", :][:-1]))
 
         # 3.3 Рассчитать, сколько процентов людей переболело
-        tmp["Процент переболевших"] = tmp["Общее число переболевших"] / compartment_sizes.sum() * 100
+        tmp["Процент переболевших"] = tmp["Общее число переболевших"] /compartment_sizes.sum() * 100
+
+        # 3.4 Рассчитать средневзвешенную по размерам групп продолжительность острой фазы вспышки
+        tmp["Продолжительность острой фазы (ср.взвш)"] = \
+            np.sum(tmp.loc["Число дней, через которое начался спад заражений", :][:-3] * tmp.loc["Размер  компартмента", :][:-3]) \
+            / np.sum(tmp.loc["Размер  компартмента", :][:-3])
 
         return tmp
 
@@ -418,7 +429,7 @@ class MyPopulation:
             ax.spines[spine].set_visible(False)
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         infected = int(total_ever_was_infected)
         total = self.population_nodes_degrees_absolute_values.sum()
@@ -446,8 +457,8 @@ class MyPopulation:
                                  .sum() \
                                  .reset_index()
 
-        plt.figure(figsize=(20, 10))
-        fig, axs = plt.subplots(1, 2, figsize=(20, 10))
+        plt.figure(figsize=(20, 7))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 7))
         axs[0].set_ylim(0, 4.5 * 10 ** 7)
         axs[1].set_ylim(0, 4.5 * 10 ** 7)
 
@@ -487,7 +498,7 @@ class MyPopulation:
         axs[1].set_ylabel("Количество семей", fontdict={'fontsize': 14})
 
         if save_path != "":
-            plt.savefig(save_path)
+            plt.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -600,8 +611,8 @@ class MyPopulation:
         tmp = tmp.tail(1)
         tmp_rural = tmp.melt()
 
-        plt.figure(figsize=(20, 10))
-        fig, axs = plt.subplots(1, 2, figsize=(20, 10))
+        plt.figure(figsize=(20, 7))
+        fig, axs = plt.subplots(1, 2, figsize=(20, 7))
         plt.style.use('ggplot')
 
         axs[0].set_ylim(0, ylim)
@@ -610,24 +621,24 @@ class MyPopulation:
         sns.barplot(x='id', y='value', data=tmp_rural, ax=axs[1], color='red')
         sns.barplot(x='id', y='value', data=tmp_urban, ax=axs[0], color='red')
 
-        axs[0].set_title("Городское население", fontdict={'fontsize': 20})
-        axs[0].set_xlabel("Число людей в семье", fontdict={'fontsize': 14})
-        axs[0].set_ylabel("Количество семей", fontdict={'fontsize': 14})
+        axs[0].set_title("Городское население", fontdict={'fontsize': 22})
+        axs[0].set_xlabel("Число людей в семье", fontdict={'fontsize': 18})
+        axs[0].set_ylabel("Количество семей", fontdict={'fontsize': 18})
         axs[0].set_xticks(ticks=tmp_urban.index, labels=["1 человек", "2 человека",
                                                          "3 человека", "4 человека",
                                                          "5 человек", "Более 6 человек"])
         axs[0].tick_params(axis='both', labelsize=11)
 
-        axs[1].set_title("Сельское население", fontdict={'fontsize': 20})
-        axs[1].set_xlabel("Число людей в семье", fontdict={'fontsize': 14})
-        axs[1].set_ylabel("Количество семей", fontdict={'fontsize': 14})
+        axs[1].set_title("Сельское население", fontdict={'fontsize': 22})
+        axs[1].set_xlabel("Число людей в семье", fontdict={'fontsize': 18})
+        axs[1].set_ylabel("Количество семей", fontdict={'fontsize': 18})
         axs[1].set_xticks(ticks=tmp_rural.index, labels=["1 человек", "2 человека",
                                                          "3 человека", "4 человека",
                                                          "5 человек", "Более 6 человек"])
         axs[1].tick_params(axis='both', labelsize=11)
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -726,7 +737,7 @@ class MyPopulation:
             ax.xaxis.set_major_formatter(FuncFormatter(abs_fmt))
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         plt.show()
         return 0
@@ -1067,7 +1078,7 @@ class MyPopulation:
         plt.show()
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -1098,7 +1109,7 @@ class MyPopulation:
         plt.show()
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -1123,14 +1134,14 @@ class MyPopulation:
         sns.barplot(x='index', y='tmp', data=tmp, ax=ax, color='red')
 
         ax.tick_params(axis='both', labelsize=14)
-        ax.set_xlabel('Степень вершины', fontdict={'fontsize': 14})
-        ax.set_ylabel('Число вершин', fontdict={'fontsize': 14})
-        ax.set_title(title, fontdict={'fontsize': 20})
+        ax.set_xlabel('Степень вершины', fontdict={'fontsize': 18})
+        ax.set_ylabel('Число вершин', fontdict={'fontsize': 18})
+        ax.set_title(title, fontdict={'fontsize': 22})
 
         plt.show()
 
         if save_path != "":
-            fig.savefig(save_path)
+            fig.savefig(save_path, bbox_inches='tight')
 
         return 0
 
@@ -1251,9 +1262,6 @@ class MyPopulation:
     def plot_graph(self,
                    display_status: bool = True) -> int:
         """ Функция рисует граф по матрице контактов """
-
-        # plt.figure(facecolor='beige')
-        plt.rcParams['axes.facecolor'] = 'black'
 
         if display_status:
             print(datetime.datetime.now(), ": Создается граф по матрице контактов ... ")
@@ -1399,13 +1407,9 @@ class MyPopulation:
                                         betta: float) -> Literal[0, 1]:
         """ Метод создает контакты по модели small-world"""
 
-        if not hasattr(self, "connections_matrix"):
+        if self.connections_matrix is None:
             self.connections_matrix = lil_matrix((self.population.shape[0], self.population.shape[0]),
                                                  dtype=np.int8)
-
-        if self.connections_matrix is None:
-            print("Ошибка: не объявлена матрица контактов")
-            return 1
 
         # создать связи между людьми по схеме small-world
         number_of_nodes = ind.size
@@ -1536,7 +1540,7 @@ class MyPopulation:
 
         if use_random_connections_approach:
             print(datetime.datetime.now(), ": Строится случайный граф Эрдёша-Реньи ... ")
-            # cоздание случайного графа Эрдёша-Реньи
+            self.population = self.population.reset_index(drop=True).reset_index().rename(columns={"index": "id"})
             self.connections_matrix = nx.to_scipy_sparse_array(nx.erdos_renyi_graph(population_size,
                                                                                     random_connections_constant),
                                                                format='lil')
@@ -1560,19 +1564,22 @@ class MyPopulation:
             print(datetime.datetime.now(), ": Создается контакты внутри школ ... ")
             average_school_size = int(self.schools_distribution_template["Число обучающихся на одну школу"].mean())
             self._create_connections_inside_schools(average_school_size=average_school_size,
-                                                    weight=10)
+                                                    weight=10,
+                                                    betta=betta)
 
         # 5 создать матрицу контактов внутри предприятий
         if lockdown and population_type == "urban":
             print(datetime.datetime.now(), ": Контакты внутри предприятий создаются только для 30% популяции ... ")
             self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
                                                          weight=10,
-                                                         lockdown=lockdown)
+                                                         lockdown=lockdown,
+                                                         betta=betta)
         else:
             print(datetime.datetime.now(), ": Создается контакты внутри предприятий ... ")
             self._create_connections_inside_manufactures(largest_manufactures_number=largest_manufactures_number,
                                                          weight=10,
-                                                         lockdown=lockdown)
+                                                         lockdown=lockdown,
+                                                         betta=betta)
 
         # 6 создать связи внутри университетов
         if lockdown and population_type == "urban":
@@ -1581,7 +1588,8 @@ class MyPopulation:
             print(datetime.datetime.now(), ": Создается контакты внутри университетов ... ")
             self._create_connection_inside_university(average_university_size=300,
                                                       average_number_of_groups=30,
-                                                      weight=10)
+                                                      weight=10,
+                                                      betta=betta)
 
         # найти число людей для каждого типа домохозяйства
         if population_type == "urban":
