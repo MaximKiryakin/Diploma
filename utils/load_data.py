@@ -3,7 +3,10 @@ from datetime import datetime, timedelta
 from utils.LabelsDict import tickers
 from urllib.parse import urlencode
 from urllib.request import urlopen
-import warnings
+from typing import List, Optional
+from utils.logger import Logger
+
+log = Logger(__name__).get_logger()
 
 
 def download_finam_quotes(
@@ -23,7 +26,6 @@ def download_finam_quotes(
             6 - 30 min, 7 - hour, 8 - day, 9 - week, 10 - month
         start: Start date in DD.MM.YYYY format
         end: End date in DD.MM.YYYY format
-        filename: Output filename (optional)
         bucket_size: Number of records per request (default: 100)
 
     Returns:
@@ -55,6 +57,8 @@ def download_finam_quotes(
     end_date = datetime.strptime(end, "%d.%m.%Y")
     result_df = None
     first_bucket = True
+    good_start_date = False
+
 
     while current_start <= end_date:
         start_rev = current_start.strftime("%Y%m%d")
@@ -98,6 +102,10 @@ def download_finam_quotes(
                 if not lines:
                     break
 
+                if lines[0][0] == 'Запрашиваемая вами глубина недоступна':
+                    current_start += delta
+                    continue
+
                 if first_bucket:
                     result_df = pd.DataFrame(lines[1:], columns=lines[0])
                     first_bucket = False
@@ -111,42 +119,61 @@ def download_finam_quotes(
                 current_start = last_date + delta
 
         except Exception as e:
-            print(f"Download error: {str(e)}")
+            log.error(f"Download error for ticker {ticker}: {str(e)}")
             break
+
+    log.info(
+        f"Downloaded dates range for ticker {ticker} : "
+        f"[{pd.to_datetime(result_df['<DATE>'].min())} : {pd.to_datetime(result_df['<DATE>'].max())}]"
+    )
 
     return result_df
 
 
-def load_stock_data(tickers_list: list, start_date: str, end_date: str, step: int, bucket_size: int = 10):
+def load_stock_data(
+        tickers_list: List[str],
+        start_date: str,
+        end_date: str,
+        step: int,
+        bucket_size: int = 10,
+) -> Optional[pd.DataFrame]:
     """
-       Loads historical stock data for multiple tickers from Finam and combines into a single DataFrame.
+    Loads historical stock data for multiple tickers from Finam and combines
+    into a single DataFrame.
 
-       Args:
-           tickers_list: List of tickers to download (e.g. ['SBER', 'GAZP'])
-           start_date: Start date in DD.MM.YYYY format
-           end_date: End date in DD.MM.YYYY format
-           step: Timeframe step from predefined values:
-               2 - 1 min, 3 - 5 min, 4 - 10 min, 5 - 15 min,
-               6 - 30 min, 7 - hour, 8 - day, 9 - week, 10 - month
-           bucket_size: Number of records per request (default: 10)
-               Smaller values may be needed for intraday data to avoid request limits
+    Args:
+        tickers_list: List of tickers to download (e.g. ['SBER', 'GAZP']).
+        start_date: Start date in DD.MM.YYYY format.
+        end_date: End date in DD.MM.YYYY format.
+        step: Timeframe step from predefined values:
+            2 - 1 min, 3 - 5 min, 4 - 10 min, 5 - 15 min,
+            6 - 30 min, 7 - hour, 8 - day, 9 - week, 10 - month.
+        bucket_size: Number of records per request (default: 10).
+            Smaller values may be needed for intraday data to avoid request limits.
 
-       Returns:
-           pd.DataFrame: Combined DataFrame containing historical data for all requested tickers.
-           Columns include:
-               '<TICKER>', '<PER>', '<DATE>', '<TIME>', '<OPEN>', '<HIGH>',
-               '<LOW>', '<CLOSE>', '<VOL>', 'datetime' (combined date+time)
+    Returns:
+        pd.DataFrame: Combined DataFrame containing historical data for all
+        requested tickers.
+        Columns include:
+            '<TICKER>', '<PER>', '<DATE>', '<TIME>', '<OPEN>', '<HIGH>',
+            '<LOW>', '<CLOSE>', '<VOL>', 'datetime' (combined date+time).
+        Returns None if no data was downloaded for any ticker.
+
+    Raises:
+        ValueError: If `tickers_list` is empty or invalid dates are provided.
     """
+    if not tickers_list:
+        raise ValueError("Tickers list cannot be empty")
 
-    total_df = None
+    total_df: Optional[pd.DataFrame] = None
+
     for ticker in tickers_list:
-
         ticker_data = download_finam_quotes(
             ticker=ticker,
             period=step,
             start=start_date,
             end=end_date,
-            bucket_size=bucket_size
+            bucket_size=bucket_size,
         )
 
         if total_df is None:
@@ -155,3 +182,95 @@ def load_stock_data(tickers_list: list, start_date: str, end_date: str, step: in
             total_df = pd.concat([total_df, ticker_data])
 
     return total_df
+
+
+def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Loads financial multipliers for a given list of companies from CSV files.
+
+    Reads CSV files for each company in `companies_list`, filters predefined financial
+    multipliers (P/E, P/FCF, etc.), and combines them into a single DataFrame.
+
+    Args:
+        companies_list: List of company tickers (e.g., ['GAZP', 'SBER']). If None,
+                       uses a default list of Russian blue-chip companies.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the selected financial multipliers
+                     for each company, with columns:
+                     - 'company' (str): Company ticker.
+                     - 'characteristic' (str): Financial multiplier (e.g., 'P/E').
+                     - Year columns (2014–2024): Multiplier values for each year.
+    """
+
+    default_companies = [
+        'GAZP', 'LKOH', 'ROSN',
+        'SBER', 'VTBR', 'T',
+        'GMKN', 'NLMK', 'RUAL',
+        'MTSS', 'RTKM',
+        'MGNT', 'X5', 'LNTA',
+    ]
+    companies_list = default_companies if companies_list is None else companies_list
+    multipliers = ['P/E', 'P/FCF', 'P/S', 'P/BV', 'EV/EBITDA', 'Долг/EBITDA']
+
+    macro = None
+    for company in companies_list:
+        tmp = pd.read_csv(f'data/multiplicators/{company}.csv', sep=';')
+        tmp.columns = ['characteristic'] + list(tmp.columns)[1:]
+
+        tmp = (
+            tmp
+            .assign(temp=lambda x: 1 * tmp['characteristic'].isin(multipliers))
+            .query('temp == 1')
+            .drop(columns='temp')
+            .assign(company=company)
+        )
+
+        macro = tmp if macro is None else pd.concat([macro, tmp])
+    
+    macro = macro.rename(
+        columns={
+            f'{year}Q{q}': f'{year}_{q}' for year in range(2000, 2025) for q in range(1, 5)
+        }
+    )
+
+    macro = macro[
+        ['company', 'characteristic'] 
+        + [
+            f'{year}_{q}'
+            for year in range(2014, 2025) 
+            for q in range(1, 5) 
+            if f'{year}_{q}' in macro.columns
+        ]
+    ]
+    
+    return macro
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
