@@ -19,5 +19,5 @@ calc = Portfolio(
         'MGNT',  'LNTA',
     ]
 )
-calc= calc.load_stock_data(use_backup_data=False).load_multipliers().create_portfolio()
+calc= calc.load_stock_data(use_backup_data=True).load_multipliers().create_portfolio()
 

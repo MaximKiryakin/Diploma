@@ -2,58 +2,77 @@ import logging
 import sys
 import os
 from datetime import datetime
-from typing import Optional
+
 
 class Logger:
     """
-    Класс-обертка над стандартным logging с записью в общий файл.
+    A wrapper class for standard logging with shared file output.
+    
+    This logger ensures all instances write to the same log file and provides
+    consistent formatting across the application. It automatically creates
+    the log directory if it doesn't exist.
+    
+    Attributes:
+        _log_file (str): Shared log file path for all instances
+        _initialized (bool): Flag tracking initialization status
     """
 
-    # Общий файл логов для всех экземпляров класса
-    _log_file = f"logs/app_{datetime.now()}.log"
-    _initialized = False
+    _log_file: str = f"logs/app_{datetime.now()}.log"
+    _initialized: bool = False
 
     def __init__(
             self,
             name: str,
             level: int = logging.INFO,
             format: str = "%(asctime)s:%(name)s:%(levelname)s: %(message)s",
-    ):
+    ) -> None:
         """
-        Инициализация логгера.
+        Initialize the logger instance.
 
-        :param name: имя логгера (обычно __name__)
-        :param level: уровень логирования (по умолчанию INFO)
-        :param format: формат сообщений
+        Args:
+            name: Logger name (typically __name__)
+            level: Logging level (default: INFO)
+            format: Message format string
         """
-        self.logger = logging.getLogger(name)
+        self.logger: logging.Logger = logging.getLogger(name)
         self.logger.setLevel(level)
 
-        # Проверяем, был ли уже настроен обработчик файла
         if not Logger._initialized:
             self._setup_handlers(format)
             Logger._initialized = True
 
-    def _setup_handlers(self, format: str):
-        """Настройка обработчиков логов."""
+    @staticmethod
+    def _setup_handlers(format: str) -> None:
+        """
+        Configure logging handlers.
+        
+        Sets up both console and file handlers with consistent formatting.
+        Creates log directory if it doesn't exist.
+        
+        Args:
+            format: Format string for log messages
+        """
         formatter = logging.Formatter(format)
 
-        # Создаем директорию для логов, если ее нет
-        os.makedirs(os.path.dirname(Logger._log_file), exist_ok=True)
+        log_dir = os.path.dirname(Logger._log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
 
-        # Обработчик для вывода в консоль
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
 
-        # Обработчик для записи в файл
         file_handler = logging.FileHandler(Logger._log_file)
         file_handler.setFormatter(formatter)
 
-        # Добавляем обработчики к корневому логгеру
         root_logger = logging.getLogger()
-        root_logger.addHandler(console_handler)
-        root_logger.addHandler(file_handler)
+        for handler in [console_handler, file_handler]:
+            root_logger.addHandler(handler)
 
     def get_logger(self) -> logging.Logger:
-        """Возвращает настроенный логгер"""
+        """
+        Get the configured logger instance.
+        
+        Returns:
+            Configured logging.Logger instance
+        """
         return self.logger

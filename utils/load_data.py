@@ -55,10 +55,7 @@ def download_finam_quotes(
     delta = period_deltas[period]
     current_start = datetime.strptime(start, "%d.%m.%Y")
     end_date = datetime.strptime(end, "%d.%m.%Y")
-    result_df = None
-    first_bucket = True
-    good_start_date = False
-
+    result_df, first_bucket = None, True
 
     while current_start <= end_date:
         start_rev = current_start.strftime("%Y%m%d")
@@ -211,7 +208,10 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
         'MGNT', 'X5', 'LNTA',
     ]
     companies_list = default_companies if companies_list is None else companies_list
-    multipliers = ['P/E', 'P/FCF', 'P/S', 'P/BV', 'EV/EBITDA', 'Долг/EBITDA']
+    multipliers = [
+        'P/E', 'P/FCF', 'P/S', 'P/BV', 'EV/EBITDA',
+        'Долг/EBITDA', 'Капитализация, млрд руб', 'Долг, млрд руб', 'Чистый долг, млрд руб'
+    ]
 
     macro = None
     for company in companies_list:
