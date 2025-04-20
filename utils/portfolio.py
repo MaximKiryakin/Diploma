@@ -548,19 +548,20 @@ class Portfolio:
         """
         self.portfolio['quarterly_volatility'] = (
             self.portfolio
-            .groupby(['ticker', pd.Grouper(key='date', freq='Q')])['close']
+            .groupby(['ticker', pd.Grouper(key='date', freq='QE')])['close']
             .transform(
                 lambda x: np.std(np.log(x / x.shift(1))) * np.sqrt(63)  # 63 ≈ среднее число торговых дней в квартале
             )
         )
 
         # Сглаживание скользящим средним
-        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].rolling(window=3).mean()
+        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].rolling(window=10).mean()
 
         # Заполнение пропусков
-        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].fillna(method='bfill')
+        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].bfill()
+
         self.portfolio['quarterly_volatility'] = 0.4
-        self.portfolio['interest_rate'] = 0.21
+
         return self
 
     def plot_combined_on_single_axis(self, save_path=None):
