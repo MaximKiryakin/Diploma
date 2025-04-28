@@ -512,9 +512,9 @@ class Portfolio:
                 linewidth=2
             )
 
-            ax.set_title(f'Stock dynamics {ticker}', fontsize=14, pad=20)
-            ax.set_xlabel('Date', fontsize=12)
-            ax.set_ylabel('Price, RUB', fontsize=13)
+            ax.set_title(f'Stock dynamics {ticker}', fontsize=14, pad=20, fontweight='bold')
+            ax.set_xlabel('Date', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Price, RUB', fontsize=13, fontweight='bold')
             ax.legend(frameon=True, facecolor='white')
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
@@ -523,7 +523,7 @@ class Portfolio:
 
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
-
+    
             if save_path:
                 plt.savefig(
                     save_path,
@@ -540,6 +540,7 @@ class Portfolio:
             plt.close(fig)
 
         return self
+
 
     def add_dynamic_features(self):
         """
