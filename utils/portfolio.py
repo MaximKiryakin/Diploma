@@ -6,6 +6,7 @@ from utils.logger import Logger
 import pickle
 from statsmodels.tsa.api import VAR
 import os
+from sklearn.utils import resample
 from scipy.optimize import root
 from scipy.stats import norm
 import numpy as np
@@ -15,6 +16,13 @@ import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import adfuller
 from pathlib import Path
 import matplotlib.dates as mdates
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.linear_model import Ridge
+import sys
+import matplotlib
+from datetime import datetime, timedelta
 
 log = Logger(__name__).get_logger()
 
@@ -28,6 +36,32 @@ class Portfolio:
         self.stocks = None
         self.tickers_list = tickers_list
         self.portfolio = None
+        self.macro_connection_summary = None
+        self.end_time = None
+        self.start_time = None
+
+    def log_system_info(self):
+        """Логирование системной информации"""
+
+        self.start_time = datetime.now()
+
+        log.info("="*60)
+        log.info(f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}")
+        log.info("="*60)
+
+
+        return self
+
+    def log_completion(self):
+        """Логирование завершения"""
+
+        self.end_time = datetime.now()
+
+        log.info("="*60)
+        log.info("ANALYSIS COMPLETED | Duration: %.1f sec", (self.end_time - self.start_time).total_seconds())
+        log.info("="*60)
+
+        return self
 
     def load_stock_data(
             self,
@@ -45,7 +79,7 @@ class Portfolio:
             with open(backup_path, 'rb') as f:
                 self.stocks = pickle.load(f)
 
-            log.info(f"Stocks data was loaded from backup")
+            log.info("Stocks data loaded from backup | Records: %d", self.stocks.shape[0])
         else:
             self.stocks = load_stock_data(
                 tickers_list=self.tickers_list if tickers_list is None else tickers_list,
@@ -94,7 +128,7 @@ class Portfolio:
             .rename(columns={'company': 'ticker'})
         )
 
-        log.info("Multipliers data was loaded")
+        log.info("Multipliers data loaded | Features: %s", list(self.multipliers.columns))
 
         return self
 
@@ -104,7 +138,7 @@ class Portfolio:
             self.stocks.merge(self.multipliers, on=['ticker', 'year', 'quarter'], how='left')
         )
 
-        log.info("Portfolio was created")
+        log.info("Portfolio created | Companies: %d", len(self.portfolio.ticker.unique()))
 
         return self
 
@@ -165,9 +199,65 @@ class Portfolio:
             .drop(columns=['Чистый долг, млрд руб'])
         )
 
-        log.info(f"The following column types were adjusted: \n{column_to_adjust}")
+        log.info("Column types adjusted: %s", column_to_adjust)
 
         return self
+
+    def add_macro_data(self):
+
+        unemployment = pd.read_excel("data/macro/unemployment.xlsx")
+        inflation = pd.read_excel('data/macro/inflation.xlsx')
+        rub_usd = pd.read_excel("data/macro/rubusd.xlsx")
+        inflation['date'] = pd.to_datetime(inflation["Дата"])
+
+        self.portfolio = (
+            self.portfolio
+            .merge(inflation, on="date", how="left")
+            .merge(unemployment, left_on="year", right_on="Year", how="left")
+            .merge(rub_usd, left_on="date", right_on="data", how="left")
+            .drop(columns=['Дата', 'Цель по инфляции', 'data'])
+        )
+
+        self.portfolio = self.portfolio.rename(
+            columns={
+                'Ключевая ставка, % годовых': 'interest_rate',
+                'Инфляция, % г/г': 'inflation',
+                'Unemployment': 'unemployment_rate',
+                'curs': 'usd_rub'
+            }
+        )
+
+        for col in ['inflation', 'interest_rate', 'unemployment_rate']:
+            self.portfolio[col] /= 100
+
+        log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
+
+        return self
+
+    def fill_missing_values(self):
+
+        self.portfolio = self.portfolio.sort_values(by=['ticker', 'date'])
+
+        missing = {}
+        columns_to_fill = ['debt', 'capitalization', 'usd_rub']
+        for col in columns_to_fill:
+
+            missing[col] = self.portfolio[col].isna().sum() / self.portfolio.shape[0]
+            self.portfolio[col] = self.portfolio.groupby('ticker')[col].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        log.info(
+            f"Missing values share in: Debt ({np.round(missing['debt'],3)*100} %),"
+            + f"Cap ({np.round(missing['capitalization'], 3)*100} %), "
+            + f"USD/RUB ({np.round(missing['usd_rub']*100, 1)} %)"
+        )
+
+        log.info(f"Missing values filled in: {columns_to_fill}")
+
+        return self
+
+
 
     def _solve_merton_vectorized(
             self,
@@ -210,7 +300,7 @@ class Portfolio:
         self.portfolio['V'] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
         self.portfolio['sigma_V'] = results[:, 1]
 
-        log.info(f"Capital cost and capital volatility were successfully calculated")
+        log.info(f"Capital cost and capital volatility calculated.")
 
         return self
 
@@ -238,7 +328,7 @@ class Portfolio:
         d2 = (np.log(V / np.where(D != 0, D, 1e-6)) + (self.portfolio['interest_rate'] - 0.5 * sigma_V**2) * T) / (sigma_V * np.sqrt(T))
         self.portfolio['PD'] = norm.cdf(-d2)
 
-        log.info(f"Merton's probabilities of default were successfully calculated")
+        log.info(f"Merton's probabilities of default calculated.")
 
         return self
 
@@ -247,42 +337,6 @@ class Portfolio:
         self = self._solve_merton_vectorized()._merton_pd()
 
         self.portfolio = self.portfolio.drop(columns=['V', 'sigma_V'])
-
-        return self
-
-    def fill_missing_values(self):
-
-        self.portfolio = self.portfolio.sort_values(by=['ticker', 'date'])
-
-        columns_to_fill = ['debt', 'capitalization']
-        for col in columns_to_fill:
-            self.portfolio[col] = self.portfolio.groupby('ticker')[col].transform(
-                lambda x: x.ffill().bfill()
-            )
-
-        log.info(f"Missing values were filled in the following columns: {columns_to_fill}")
-
-        return self
-
-    def add_macro_data(self):
-
-        df = pd.read_excel('data/interestRateInflation/inflation.xlsx')
-        df['date'] = pd.to_datetime(df["Дата"])
-
-        self.portfolio = self.portfolio.merge(df, on="date", how="left")
-
-        self.portfolio = self.portfolio.drop(columns=['Дата', 'Цель по инфляции'])
-        self.portfolio = self.portfolio.rename(
-            columns={
-                'Ключевая ставка, % годовых': 'interest_rate',
-                'Инфляция, % г/г': 'inflation'
-            }
-        )
-
-        self.portfolio['interest_rate'] /= 100
-        self.portfolio['inflation'] /= 100
-
-        log.info("Interest rate and inflation were added")
 
         return self
 
@@ -332,13 +386,19 @@ class Portfolio:
 
             if save_path:
                 plt.savefig(save_path, bbox_inches='tight')
-                log.info(f"Plot was saved: {save_path}")
 
             if verbose:
                 plt.show()
             else:
                 plt.clf()
             plt.close()
+
+        if tickers:
+            log.info(
+                "PD graphs saved | "
+                f"Companies: {len(tickers)} | "
+                f"Path: logs/graphs/"
+            )
 
         return self
 
@@ -347,11 +407,13 @@ class Portfolio:
             self,
             columns: Optional[List[str]] = None,
             impulses_responses: Dict[str, str] = None,
-            figsize: Tuple[int, int] = (12, 6),
-            save_path: Optional[str] = None
+            figsize: Tuple[int, int] = (10, 5),
+            save_path: Optional[str] = None,
+            verbose: bool = False
         ) -> "Portfolio":
         """
         Calculates impulse response functions for the given impulses and responses
+        :param verbose:
         :param columns: list of columns to include in the analysis
         :param impulses_responses: dictionary of impulses and responses (e.g., {'interest_rate': 'PD', 'inflation': 'PD'})
         :param figsize: size of the plot. Default is (12, 6)
@@ -367,20 +429,19 @@ class Portfolio:
 
         cols_before_diff = {}
         for col in data.columns:
-            result = adfuller(data[col].dropna())[1]
-            cols_before_diff[col] = result
-
-        log.info("p-values before differencing:\n%s", pd.Series(cols_before_diff))
+            cols_before_diff[col] = adfuller(data[col].dropna())[1]
 
         if any(p > 0.05 for p in cols_before_diff.values()):
+
+            log.info("p-values before differencing:\n%s", pd.Series(cols_before_diff))
+
             data = data.diff().dropna()
             log.info("Applied differencing to achieve stationarity")
 
-        for col in data.columns:
-            result = adfuller(data[col].dropna())[1]
-            cols_before_diff[col] = result
+            for col in data.columns:
+                cols_before_diff[col] = adfuller(data[col].dropna())[1]
 
-        log.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
+            log.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
 
         if not isinstance(data.index, pd.DatetimeIndex):
             data.index = pd.RangeIndex(start=0, stop=len(data))
@@ -388,7 +449,8 @@ class Portfolio:
         model = VAR(data)
         lag_order = model.select_order(maxlags=6)
         selected_lags = lag_order.aic
-        log.info(f'Optimal lag order: {selected_lags}')
+
+        log.info(f'Optimal lag number calculated | Optimal number of lags: {selected_lags}')
 
         results = model.fit(maxlags=selected_lags, ic='aic')
 
@@ -402,7 +464,11 @@ class Portfolio:
                 plt.savefig(save_path, bbox_inches='tight')
                 log.info(f"Plot was saved: {save_path}")
 
-            plt.show()
+            if verbose:
+                plt.show()
+            else:
+                plt.clf()
+            plt.close()
 
         return self
 
@@ -413,7 +479,8 @@ class Portfolio:
         figsize: tuple = (15, 10),
         dpi: int = 300,
         annot_size: int = 8,
-    ) -> None:
+        verbose: bool = False
+    ) -> "Portfolio":
         """
         Строит и сохраняет корреляционную матрицу цен закрытия акций
 
@@ -475,17 +542,23 @@ class Portfolio:
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
-            print(f"График сохранен: {save_path}")
+            log.info(f"Correlation matrix saved | Path: {save_path}")
 
-        plt.show()
+        if verbose:
+            plt.show()
+        else:
+            plt.clf()
+        plt.close()
+
         return self
 
     def plot_stocks(
-            self,
-            tickers: List[str],
-            figsize: Tuple[int, int] = (12, 6),
-            verbose: bool = False
-        ) -> "Portfolio":
+        self,
+        tickers: List[str],
+        figsize: Tuple[int, int] = (10, 5),
+        verbose: bool = False,
+        fontsize: int = 16,
+    ) -> "Portfolio":
         """
         Plots stock charts for the given tickers
         :param verbose:
@@ -493,6 +566,7 @@ class Portfolio:
         :param save_path: path to save the file (if not specified - does not save)
         :param figsize: size of the plot. Default is (12, 6)
         """
+
         for ticker in tickers:
 
             stock_data = self.portfolio[self.portfolio['ticker'] == ticker]
@@ -512,14 +586,14 @@ class Portfolio:
                 linewidth=2
             )
 
-            ax.set_title(f'Stock dynamics {ticker}', fontsize=14, pad=20, fontweight='bold')
-            ax.set_xlabel('Date', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Price, RUB', fontsize=13, fontweight='bold')
+            ax.set_title(f'Stock dynamics {ticker}', fontsize=fontsize, pad=20)
+            ax.set_xlabel('Date')
+            ax.set_ylabel('Price, RUB',)
             ax.legend(frameon=True, facecolor='white')
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-            plt.xticks(rotation=45)
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=7))
+            plt.xticks(rotation=0)
 
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
@@ -527,17 +601,24 @@ class Portfolio:
             if save_path:
                 plt.savefig(
                     save_path,
-                    dpi=300,
+                    dpi=100,
                     bbox_inches='tight',
                     facecolor='white'
                 )
-                log.info(f"Plot was saved: {save_path}")
+
 
             if verbose:
                 plt.show()
             else:
                 plt.clf()
-            plt.close(fig)
+            plt.close()
+
+        if tickers:
+            log.info(
+                "Stock prices graphs saved | "
+                f"Companies: {len(tickers)} | "
+                f"Path: logs/graphs/"
+            )
 
         return self
 
@@ -565,22 +646,19 @@ class Portfolio:
 
         return self
 
-    def plot_combined_on_single_axis(self, save_path=None):
+    def plot_debt_capitalization(self, verbose=False, figsize=(10, 5)):
         """
         Рисует совместный график капитализации и долга на одной оси Y
         """
-        # Группируем по тикерам
+
+        save_path = f'logs/graphs/debt_catitalization.png'
         grouped = self.portfolio.groupby('ticker')
 
         for ticker, group in grouped:
-            # Сортируем и чистим данные
+
             group = group.sort_values('date').dropna(subset=['capitalization', 'debt'])
+            plt.figure(figsize=figsize)
 
-            # Создаем фигуру
-            plt.figure(figsize=(14, 8))
-            ax = plt.gca()
-
-            # Рисуем оба показателя
             plt.plot(group['date'], group['capitalization'],
                     marker='o', linestyle='-', color='#2ecc71', linewidth=2,
                     markersize=8, label='Capitalization')
@@ -589,14 +667,11 @@ class Portfolio:
                     marker='s', linestyle='--', color='#e74c3c', linewidth=2,
                     markersize=8, label='Debt')
 
-            # Настройки графика
             plt.title(f'{ticker}: Capitalization vs Debt', fontsize=14, pad=20)
             plt.xlabel('Date', fontsize=12)
             plt.ylabel('Value', fontsize=12)
-            plt.xticks(rotation=45)
             plt.grid(True, alpha=0.3)
 
-            # Улучшенная легенда
             plt.legend(
                 loc='upper left',
                 frameon=True,
@@ -605,21 +680,151 @@ class Portfolio:
                 facecolor='white'
             )
 
-            # Автомасштабирование для дат
             plt.tight_layout()
 
-            # Сохранение или отображение
-            if save_path:
-                plt.savefig(f"{save_path}/{ticker}_combined_single_axis.png",
-                           bbox_inches='tight', dpi=100)
-                plt.close()
-            else:
+            plt.savefig(save_path, bbox_inches='tight', dpi=100)
+
+            if verbose:
                 plt.show()
+            else:
+                plt.clf()
+            plt.close()
+
+        if save_path:
+            log.info(
+                    "Capitalization-debt graphs saved | "
+                    f"Companies: {len(self.portfolio.ticker.unique())} | "
+                    f"Path: {save_path}"
+                )
 
         return self
 
+    def calc_macro_connections(
+        self,
+        min_samples: int = 10,
+        n_bootstraps: int = 500,
+        conf_level: int = 95
+    ) -> "Portfolio":
+        """
+        Calculates macroeconomic connections for the given portfolio
+        :param min_samples: minimum number of samples required for each ticker
+        :param n_bootstraps: number of bootstraps for confidence intervals
+        :param conf_level: confidence level for confidence intervals
+        """
+        df = self.portfolio.copy()
+        targets = ['debt', 'capitalization']
 
+        results = []
 
+        tickers = df['ticker'].unique()
+
+        def format_ci(low, high):
+            return f"[{low:.3f}, {high:.3f}]"
+
+        for ticker in tickers:
+
+            df_ticker = df[df['ticker'] == ticker].copy()
+
+            if len(df_ticker) < min_samples:
+                continue
+
+            for target in targets:
+                record = {
+                    'ticker': ticker,
+                    'target': target,
+                    'best_alpha': np.nan,
+                    'mse_model': np.nan,
+                    'mse_baseline': np.nan,
+                    'r2': np.nan,
+                    'coef_inflation': np.nan,
+                    'coef_inflation_ci': np.nan,
+                    'coef_unemployment': np.nan,
+                    'coef_unemployment_ci': np.nan,
+                    'coef_usd_rub': np.nan,
+                    'coef_usd_rub_ci': np.nan
+                }
+
+                try:
+                    Q1 = df_ticker[target].quantile(0.05)
+                    Q3 = df_ticker[target].quantile(0.95)
+                    df_target = df_ticker[(df_ticker[target] >= Q1) & (df_ticker[target] <= Q3)].copy()
+
+                    if len(df_target) < 5:
+                        continue
+
+                    y = np.log(df_target[target] + 1e-9)
+                    X = df_target[['inflation', 'unemployment_rate', 'usd_rub']]
+
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.2, random_state=42
+                    )
+
+                    if len(y_test) == 0:
+                        continue
+
+                    scaler = StandardScaler()
+                    X_train_scaled = scaler.fit_transform(X_train)
+                    X_test_scaled = scaler.transform(X_test)
+
+                    y_pred_baseline = np.full_like(y_test, y_train.mean())
+                    mse_baseline = mean_squared_error(y_test, y_pred_baseline)
+
+                    ridge = Ridge()
+                    grid = GridSearchCV(
+                        ridge,
+                        {'alpha': np.logspace(-3, 2, 50)},
+                        cv=5,
+                        scoring='neg_mean_squared_error'
+                    )
+                    grid.fit(X_train_scaled, y_train)
+                    best_model = grid.best_estimator_
+                    y_pred = best_model.predict(X_test_scaled)
+
+                    coefs = []
+                    for _ in range(n_bootstraps):
+                        X_bs, y_bs = resample(X_train_scaled, y_train)
+                        model = Ridge(alpha=grid.best_params_['alpha'])
+                        model.fit(X_bs, y_bs)
+                        coefs.append(model.coef_)
+
+                    alpha = (100 - conf_level) / 2
+                    ci_low, ci_high = alpha, 100 - alpha
+                    coefs = np.array(coefs)
+
+                    low_inf, high_inf = np.percentile(coefs[:, 0], [ci_low, ci_high])
+                    low_unemp, high_unemp = np.percentile(coefs[:, 1], [ci_low, ci_high])
+                    low_usd, high_usd = np.percentile(coefs[:, 2], [ci_low, ci_high])
+
+                    ci_inflation = format_ci(low_inf, high_inf)
+                    ci_unemployment = format_ci(low_unemp, high_unemp)
+                    ci_usd_rub = format_ci(low_usd, high_usd)
+
+                    record.update({
+                        'best_alpha': grid.best_params_['alpha'],
+                        'mse_model': mean_squared_error(y_test, y_pred),
+                        'mse_baseline': mse_baseline,
+                        'r2': r2_score(y_test, y_pred),
+                        'coef_inflation': best_model.coef_[0],
+                        'coef_inflation_ci': ci_inflation,
+                        'coef_unemployment': best_model.coef_[1],
+                        'coef_unemployment_ci': ci_unemployment,
+                        'coef_usd_rub': best_model.coef_[2],
+                        'coef_usd_rub_ci': ci_usd_rub
+                    })
+
+                except Exception as e:
+                    log.error(f"Ошибка для {ticker}-{target}: {str(e)}")
+                    continue
+
+                results.append(record)
+
+        result_df = pd.DataFrame(results)
+        result_df = result_df.dropna(subset=['best_alpha'])
+
+        self.macro_connection_summary = result_df
+        log.info("Macro connection summary calculated.")
+
+        return self
 
 
 

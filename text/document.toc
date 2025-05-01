@@ -1,8 +1,0 @@
-\babel@toc {russian}{}\relax 
-\contentsline {section}{\numberline {1}Введение}{2}{section.1}%
-\contentsline {section}{\numberline {2}Анализ современных методов управления кредитным риском}{3}{section.2}%
-\contentsline {section}{\numberline {3}Математическая постановка задачи моделирования кредитного портфеля}{5}{section.3}%
-\contentsline {section}{\numberline {4}Составление кредитного портфеля}{6}{section.4}%
-\contentsline {section}{\numberline {5}Программная реализация алгоритма}{10}{section.5}%
-\contentsline {section}{\numberline {6}Анализ результатов}{12}{section.6}%
-\contentsline {section}{\numberline {7}Заключение}{13}{section.7}%

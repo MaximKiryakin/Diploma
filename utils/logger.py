@@ -3,6 +3,7 @@ import sys
 import os
 from datetime import datetime
 
+logging.getLogger('matplotlib').setLevel(logging.ERROR)
 
 class Logger:
     """
