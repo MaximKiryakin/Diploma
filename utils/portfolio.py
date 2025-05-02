@@ -41,7 +41,12 @@ class Portfolio:
         self.start_time = None
 
     def log_system_info(self):
-        """Логирование системной информации"""
+        """
+        Logs system information.
+
+        Returns:
+            Portfolio: Updated portfolio with logged system information.
+        """
 
         self.start_time = datetime.now()
 
@@ -49,11 +54,15 @@ class Portfolio:
         log.info(f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}")
         log.info("="*60)
 
-
         return self
 
     def log_completion(self):
-        """Логирование завершения"""
+        """
+        Logs the completion of the analysis.
+
+        Returns:
+            Portfolio: Updated portfolio with logged completion.
+        """
 
         self.end_time = datetime.now()
 
@@ -70,6 +79,18 @@ class Portfolio:
             create_backup: bool = False,
             backup_path: str = "data/backup/stocks.pkl"
     ) -> "Portfolio":
+        """
+        Loads stock data for the given tickers.
+
+        Args:
+            tickers_list (list[str], optional): List of tickers. If not specified, uses the default tickers list.
+            use_backup_data (bool, optional): If True, loads stock data from backup file. Defaults to False.
+            create_backup (bool, optional): If True, creates a backup file with the loaded stock data. Defaults to False.
+            backup_path (str, optional): Path to the backup file. Defaults to "data/backup/stocks.pkl".
+
+        Returns:
+            Portfolio: Updated portfolio with loaded stock data.
+        """
 
         if use_backup_data:
             if not os.path.isfile(backup_path):
@@ -108,6 +129,15 @@ class Portfolio:
         return self
 
     def load_multipliers(self, tickers_list: list[str] = None):
+        """
+        Loads multipliers data for the given tickers.
+
+        Args:
+            tickers_list (list[str], optional): List of tickers. If not specified, uses the default tickers list.
+
+        Returns:
+            Portfolio: Updated portfolio with loaded multipliers data.
+        """
 
         self.multipliers = load_multipliers(
             companies_list=self.tickers_list if tickers_list is None else tickers_list,
@@ -133,6 +163,12 @@ class Portfolio:
         return self
 
     def create_portfolio(self):
+        """
+        Creates a portfolio by merging stocks and multipliers data.
+
+        Returns:
+            Portfolio: Created portfolio.
+        """
 
         self.portfolio = (
             self.stocks.merge(self.multipliers, on=['ticker', 'year', 'quarter'], how='left')
@@ -143,6 +179,12 @@ class Portfolio:
         return self
 
     def adjust_portfolio_data_types(self):
+        """
+        Adjusts the data types of the portfolio data.
+
+        Returns:
+            Portfolio: Updated portfolio with adjusted data types.
+        """
 
         columns_new_names = {
             'Долг, млрд руб': 'debt',
@@ -160,12 +202,6 @@ class Portfolio:
             self.portfolio[col] = pd.to_numeric(self.portfolio[col], errors="coerce")
             if 'млрд руб' in col:
                 self.portfolio[col] *= 1e9
-
-        #self.portfolio['Долг, млрд руб'] = np.where(
-        #    (self.portfolio['Долг, млрд руб'].notna()) & (self.portfolio['Чистый долг, млрд руб'].ne(0)),
-        #    self.portfolio['Долг, млрд руб'],
-        #    self.portfolio['Чистый долг, млрд руб']
-        #)
 
         self.portfolio['Долг, млрд руб'] = np.select(
             [
@@ -204,7 +240,14 @@ class Portfolio:
         return self
 
     def add_macro_data(self):
+        """
+        Adds macroeconomic data to the portfolio data.
 
+        Returns:
+            Portfolio: Updated portfolio with added macroeconomic data.
+        """
+
+        # TODO create special loader for data
         unemployment = pd.read_excel("data/macro/unemployment.xlsx")
         inflation = pd.read_excel('data/macro/inflation.xlsx')
         rub_usd = pd.read_excel("data/macro/rubusd.xlsx")
@@ -235,6 +278,12 @@ class Portfolio:
         return self
 
     def fill_missing_values(self):
+        """
+        Fills missing values in the portfolio data.
+
+        Returns:
+            Portfolio: Updated portfolio with missing values filled.
+        """
 
         self.portfolio = self.portfolio.sort_values(by=['ticker', 'date'])
 
@@ -257,24 +306,20 @@ class Portfolio:
 
         return self
 
-
-
     def _solve_merton_vectorized(
-            self,
-            T: float = 1
+        self,
+        T: float = 1
     ) -> "Portfolio":
         """
-        Решение системы уравнений для оценки V и sigma_V.
+        Solves the system of equations to estimate V and sigma_V.
 
-        Параметры:
-            E (float): Рыночная капитализация (equity).
-            D (float): Долг (debt).
-            r (float): Безрисковая ставка.
-            T (float): Горизонт времени.
+        Args:
+            T (float): Time horizon.
 
-        Возвращает:
-            tuple: (V, sigma_V)
+        Returns:
+            Portfolio: Updated portfolio with calculated capital cost and capital volatility.
         """
+
         E = self.portfolio["capitalization"].values.astype(float)
         D = self.portfolio["debt"].values.astype(float)
         sigma_E = self.portfolio['quarterly_volatility'].values.astype(float)
@@ -288,10 +333,10 @@ class Portfolio:
             eq2 = N_d1 * sigma_V * V - sigma_E_i * E_i
             return [eq1, eq2]
 
-        # Начальные приближения для всех элементов
+        # Initial guesses for all elements
         initial_guess = np.vstack([E + D, sigma_E]).T
 
-        # Решение для каждого элемента
+        # Solve for each element
         results = np.array([
             root(equations, guess, args=(E[i], D[i], self.portfolio['interest_rate'][i], sigma_E[i], T)).x
             for i, guess in enumerate(initial_guess)
@@ -309,16 +354,13 @@ class Portfolio:
         T: float = 1
     ) -> "Portfolio":
         """
-        Расчет вероятности дефолта (PD) по модели Мертона.
+        Calculates the probability of default (PD) using the Merton model.
 
-        Параметры:
-            V (float): Рыночная стоимость активов компании.
-            D (float): Уровень долга (обязательства) компании.
-            sigma_V (float): Волатильность стоимости активов (десятичная дробь).
-            T (float): Горизонт времени до погашения долга (в годах).
+        Args:
+            T (float): Time horizon for the default event (in years).
 
-        Возвращает:
-
+        Returns:
+            Portfolio: Updated portfolio with calculated probabilities of default.
         """
 
         V = self.portfolio['V'].values.astype(float)
@@ -333,7 +375,12 @@ class Portfolio:
         return self
 
     def add_merton_pd(self) -> "Portfolio":
+        """
+        Adds the probability of default (PD) calculated using the Merton model to the portfolio data.
 
+        Returns:
+            Portfolio: Updated portfolio with added probabilities of default.
+        """
         self = self._solve_merton_vectorized()._merton_pd()
 
         self.portfolio = self.portfolio.drop(columns=['V', 'sigma_V'])
@@ -343,15 +390,19 @@ class Portfolio:
     def plot_pd_by_tickers(
         self,
         tickers: list,
-        figsize: tuple = (12, 6),
+        figsize: tuple = (10, 4),
         verbose: bool = False
     ) -> "Portfolio":
         """
-        Строит графики вероятности дефолта (PD) для указанных тикеров
+        Plots the probability of default (PD) for the given tickers.
 
-        Параметры:
-        tickers (list): Список тикеров акций (например: ['GAZP', 'FESH'])
-        figsize (tuple): Размер графика. По умолчанию (12, 6)
+        Args:
+            tickers (list): List of stock tickers (e.g., ['GAZP', 'FESH']).
+            figsize (tuple): Size of the plot. Default is (12, 6).
+            verbose (bool): If True, displays the plot. If False, saves the plot to a file.
+
+        Returns:
+            Portfolio: Updated portfolio with plotted probabilities of default.
         """
 
         sns.set_theme(style="whitegrid")
@@ -402,30 +453,30 @@ class Portfolio:
 
         return self
 
-
     def calc_irf(
             self,
-            columns: Optional[List[str]] = None,
             impulses_responses: Dict[str, str] = None,
-            figsize: Tuple[int, int] = (10, 5),
-            save_path: Optional[str] = None,
+            figsize: Tuple[int, int] = (10, 4),
             verbose: bool = False
         ) -> "Portfolio":
         """
-        Calculates impulse response functions for the given impulses and responses
-        :param verbose:
-        :param columns: list of columns to include in the analysis
-        :param impulses_responses: dictionary of impulses and responses (e.g., {'interest_rate': 'PD', 'inflation': 'PD'})
-        :param figsize: size of the plot. Default is (12, 6)
-        :param save_path: path to save the file (if not specified - does not save)
+        Calculates impulse response functions for the given impulses and responses.
+
+        Args:
+            impulses_responses (dict[str, str], optional): Dictionary of impulses and responses (e.g., {'interest_rate': 'PD', 'inflation': 'PD'}).
+            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
+            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+
+        Returns:
+            Portfolio: Updated portfolio with calculated impulse response functions.
         """
+
         if impulses_responses is None:
             raise ValueError("Impulses and responses must be specified")
 
-        if columns is None:
-            columns = ['ticker', 'date', 'open', 'high', 'low', 'close', 'interest_rate', 'inflation', 'PD']
+        columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
 
-        data = self.portfolio.sort_values(["ticker", "date"])[columns].dropna()[columns[2:]]
+        data = self.portfolio.sort_values(["ticker", "date"])[columns].dropna()[columns]
 
         cols_before_diff = {}
         for col in data.columns:
@@ -455,20 +506,44 @@ class Portfolio:
         results = model.fit(maxlags=selected_lags, ic='aic')
 
         for impulse, response in impulses_responses.items():
-            plt.figure(figsize=figsize)
             irf = results.irf(periods=selected_lags)
-            irf.plot(impulse=impulse, response=response, orth=True, figsize=figsize)
-            plt.title(f'Impulse response: Shock {impulse} → {response}')
 
-            if save_path:
-                plt.savefig(save_path, bbox_inches='tight')
-                log.info(f"Plot was saved: {save_path}")
+            ax = irf.plot(
+                impulse=impulse,
+                response=response,
+                orth=True,
+                figsize=figsize,
+                plot_params={
+                    'title': None,
+                    'subtitle': False
+                }
+            )
+
+            fig = ax.get_figure()
+
+            fig.suptitle('')
+            for a in fig.axes:
+                a.set_title('')
+
+            fig.suptitle(
+                f"Impulse Response Function (IRF): {impulse} → {response}\n"
+                f"Method: VAR with AIC lag selection | 95% Confidence Intervals",
+                fontsize=11, y=1.02
+            )
+
+            plt.xlabel('Горизонт, кварталы')
+            plt.ylabel('Изменение PD, базисные пункты')
+
+            save_path = f'logs/graphs/irf_{impulse}_{response}.png'
+            plt.savefig(save_path, bbox_inches='tight')
 
             if verbose:
                 plt.show()
             else:
                 plt.clf()
-            plt.close()
+        plt.close()
+
+        log.info(f"Impulse response functions saved | Path: logs/graphs/")
 
         return self
 
@@ -482,42 +557,41 @@ class Portfolio:
         verbose: bool = False
     ) -> "Portfolio":
         """
-        Строит и сохраняет корреляционную матрицу цен закрытия акций
+        Plots and saves the correlation matrix of stock closing prices.
 
-        :param custom_order: Порядок тикеров для группировки
-        :param save_path: Путь для сохранения графика (None - не сохранять)
-        :param figsize: Размер графика
-        :param dpi: Качество сохранения
-        :param annot_size: Размер аннотаций
+        Args:
+            custom_order (list): Order of tickers for grouping.
+            save_path (str, optional): Path to save the plot (None - do not save).
+            figsize (tuple[int, int], optional): Size of the plot. Default is (15, 10).
+            dpi (int, optional): Quality of saving. Default is 300.
+            annot_size (int, optional): Size of annotations. Default is 8.
+            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+
+        Returns:
+            Portfolio: Updated portfolio with plotted correlation matrix.
         """
 
         if save_path is None:
             save_path = f'logs/graphs/corr_matrix.png'
 
-        # Создаем сводную таблицу
         pivot_data = self.portfolio.pivot_table(
             index='date',
             columns='ticker',
             values='close'
         )
 
-        # Интерполяция и фильтрация данных
         pivot_data = pivot_data.interpolate(method='time', limit_direction='both')
         valid_tickers = [t for t in custom_order if t in pivot_data.columns]
 
         if not valid_tickers:
-            raise ValueError("Нет данных для построения матрицы")
+            raise ValueError("No data for plotting the matrix")
 
         pivot_data = pivot_data[valid_tickers]
 
-        # Рассчитываем позиции для разделительных линий
-        sector_breaks = [3, 6, 9, 12]  # Позиции после каждой отрасли
+        sector_breaks = [3, 6, 9, 12]
 
-
-        # Строим матрицу корреляций
         corr_matrix = pivot_data.corr()
 
-        # Визуализация
         plt.figure(figsize=figsize)
         sns.heatmap(
             corr_matrix,
@@ -528,7 +602,6 @@ class Portfolio:
             annot_kws={"size": annot_size}
         )
 
-        # Добавляем разделители
         for pos in sector_breaks:
             plt.axvline(pos, color='black', linewidth=2)
             plt.axhline(pos, color='black', linewidth=2)
@@ -538,7 +611,6 @@ class Portfolio:
         plt.yticks(rotation=0)
         plt.tight_layout()
 
-        # Сохранение
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
@@ -555,16 +627,21 @@ class Portfolio:
     def plot_stocks(
         self,
         tickers: List[str],
-        figsize: Tuple[int, int] = (10, 5),
+        figsize: Tuple[int, int] = (10, 4),
         verbose: bool = False,
         fontsize: int = 16,
     ) -> "Portfolio":
         """
-        Plots stock charts for the given tickers
-        :param verbose:
-        :param tickers: list of stock tickers (e.g., ['FESH', 'GAZP'])
-        :param save_path: path to save the file (if not specified - does not save)
-        :param figsize: size of the plot. Default is (12, 6)
+        Plots stock charts for the given tickers.
+
+        Args:
+            tickers (list[str]): List of stock tickers (e.g., ['FESH', 'GAZP']).
+            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
+            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+            fontsize (int, optional): Font size for the plot. Default is 16.
+
+        Returns:
+            Portfolio: Updated portfolio with plotted stock charts.
         """
 
         for ticker in tickers:
@@ -606,7 +683,6 @@ class Portfolio:
                     facecolor='white'
                 )
 
-
             if verbose:
                 plt.show()
             else:
@@ -625,9 +701,12 @@ class Portfolio:
 
     def add_dynamic_features(self):
         """
-        Add dynamic features to the portfolio data.
-        :return:
+        Adds dynamic features to the portfolio data.
+
+        Returns:
+            Portfolio: Updated portfolio with added dynamic features.
         """
+
         self.portfolio['quarterly_volatility'] = (
             self.portfolio
             .groupby(['ticker', pd.Grouper(key='date', freq='QE')])['close']
@@ -636,19 +715,25 @@ class Portfolio:
             )
         )
 
-        # Сглаживание скользящим средним
         self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].rolling(window=10).mean()
 
-        # Заполнение пропусков
         self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].bfill()
 
+        # Adhoc values for missing quarterly volatility data
         self.portfolio['quarterly_volatility'] = 0.4
 
         return self
 
-    def plot_debt_capitalization(self, verbose=False, figsize=(10, 5)):
+    def plot_debt_capitalization(self, verbose=False, figsize=(10, 4)):
         """
-        Рисует совместный график капитализации и долга на одной оси Y
+        Plots a combined chart of capitalization and debt on the same Y-axis.
+
+        Args:
+            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
+
+        Returns:
+            Portfolio: Updated portfolio with plotted capitalization and debt.
         """
 
         save_path = f'logs/graphs/debt_catitalization.png'
@@ -692,10 +777,10 @@ class Portfolio:
 
         if save_path:
             log.info(
-                    "Capitalization-debt graphs saved | "
-                    f"Companies: {len(self.portfolio.ticker.unique())} | "
-                    f"Path: {save_path}"
-                )
+                "Capitalization-debt graphs saved | "
+                f"Companies: {len(self.portfolio.ticker.unique())} | "
+                f"Path: {save_path}"
+            )
 
         return self
 
@@ -706,11 +791,17 @@ class Portfolio:
         conf_level: int = 95
     ) -> "Portfolio":
         """
-        Calculates macroeconomic connections for the given portfolio
-        :param min_samples: minimum number of samples required for each ticker
-        :param n_bootstraps: number of bootstraps for confidence intervals
-        :param conf_level: confidence level for confidence intervals
+        Calculates macroeconomic connections for the given portfolio.
+
+        Args:
+            min_samples (int, optional): Minimum number of samples required for each ticker. Default is 10.
+            n_bootstraps (int, optional): Number of bootstraps for confidence intervals. Default is 500.
+            conf_level (int, optional): Confidence level for confidence intervals. Default is 95.
+
+        Returns:
+            Portfolio: Updated portfolio with calculated macroeconomic connections.
         """
+
         df = self.portfolio.copy()
         targets = ['debt', 'capitalization']
 
@@ -825,6 +916,3 @@ class Portfolio:
         log.info("Macro connection summary calculated.")
 
         return self
-
-
-
