@@ -417,9 +417,9 @@ class Portfolio:
                 log.info(f"No data for ticker {ticker}")
                 continue
 
-            plt.figure(figsize=figsize)
+            fig, ax = plt.subplots(figsize=figsize)
 
-            plt.plot(
+            ax.plot(
                 data['date'],
                 data['PD'] * 100,
                 marker='o',
@@ -429,14 +429,14 @@ class Portfolio:
                 markersize=5
             )
 
-            plt.title(f'Вероятность дефолта ({ticker})', fontsize=14, pad=20)
-            plt.xlabel('Дата', fontsize=12)
-            plt.ylabel('PD, %', fontsize=12)
-            plt.xticks(rotation=0)
+            ax.set_title(f'Вероятность дефолта ({ticker})', fontsize=14, pad=20)
+            ax.set_xlabel('Дата', fontsize=12)
+            ax.set_ylabel('PD, %', fontsize=12)
+
             plt.tight_layout()
 
             if save_path:
-                plt.savefig(save_path, bbox_inches='tight')
+                plt.savefig(save_path, bbox_inches='tight', facecolor="white")
 
             if verbose:
                 plt.show()
@@ -535,7 +535,7 @@ class Portfolio:
             plt.ylabel('Изменение PD, базисные пункты')
 
             save_path = f'logs/graphs/irf_{impulse}_{response}.png'
-            plt.savefig(save_path, bbox_inches='tight')
+            plt.savefig(save_path, bbox_inches='tight', facecolor="white")
 
             if verbose:
                 plt.show()
@@ -613,7 +613,7 @@ class Portfolio:
 
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor="white")
             log.info(f"Correlation matrix saved | Path: {save_path}")
 
         if verbose:
@@ -697,7 +697,6 @@ class Portfolio:
             )
 
         return self
-
 
     def add_dynamic_features(self):
         """
