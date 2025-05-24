@@ -1,0 +1,77 @@
+%основное
+\usepackage{cmap} % для кодировки шрифтов в pdf
+\defaulthyphenchar=127 
+\usepackage[T1,T2A]{fontenc} 
+\usepackage[utf8]{inputenc}
+\usepackage[english,russian]{babel}
+
+%\usepackage{indentfirst}\parindent=2.5em 
+
+%математика
+\usepackage{amsmath,amstext,amsfonts,amssymb}
+\usepackage{mathtext,mathrsfs,array}
+
+\usepackage{moreverb}
+
+%% Выбор шрифтов %% 
+
+%\usepackage{mathptmx}
+%\usepackage{helvet} %arev, avant, bookman, chancery, charter, euler, helvet, lmodern,mathtime ,mathptm, mathptmx, newcent, palatino, pifont, utopia.
+%\usepackage{bookman}
+
+%\usefonttheme{serif} % нормальные шрифты текста-формул в целом
+\usefonttheme{professionalfonts} % все sffamily кроме формул (они serif)
+%\usepackage{concmath}
+%\usepackage{cmbright}
+%\usefonttheme[stillsansserifmath]{serif}
+%\usefonttheme[onlymath]{serif} % Использовать шрифт с засечками для формул (+ \usepackage{cmbright} --- хорого отображаются гречиские буквы)
+%\usefonttheme[onlylarge]{structurebold} % main , frame titles, and section entries in the table of contents будут жирненькими
+%\setbeamerfont{institute}{size=\normalsize} % Более крупный шрифт для подзаголовков титульного листа
+
+%\setbeamerfont{title}{family=\sffamily}%,size=\large
+%\setbeamerfont{subtitle}{family=\sffamily,size=\small}
+\setbeamerfont{author}{size=\normalsize}
+%\setbeamerfont{institute}{size=\normalsize}
+\setbeamerfont{date}{size=\normalsize}
+%\setbeamerfont{frametitle}{family=\sffamily}
+%\setbeamerfont{block title}{family=\sffamily,size=\large}
+%\setbeamerfont{contents}{family=\sffamily}
+
+%\setbeamerfont{bibliography item}{size=\small}
+%\setbeamerfont{bibliography entry author}{shape=\itshape}
+%\setbeamerfont{bibliography entry title}{size=\small}
+%\setbeamerfont{bibliography entry location}{size=\small}
+%\setbeamerfont{bibliography entry note}{size=\small}
+
+\useinnertheme{circles}
+%\useinnertheme{rectangles}
+
+
+\usepackage{soulutf8}% Поддержка переносоустойчивых подчёркиваний и зачёркиваний
+\usepackage{icomma}  % Запятая в десятичных дробях
+
+%%%%%%%%%%%%%%%%%%%
+
+% Если используется последовательное появление пунктов списков на
+% слайде (не злоупотребляйте в слайдах для защиты дипломной работы),
+% чтобы еще непоявившиеся пункты были все-таки немножко видны.
+\setbeamercovered{transparent}
+
+% отключить клавиши навигации
+\setbeamertemplate{navigation symbols}{}
+
+%command to set the logo to nothing
+\newcommand{\nologo}{\setbeamertemplate{logo}{}} 
+
+
+\usepackage{comment}  %для комментирования большого крол-ва строк
+
+\newcommand{\specialcell}[2][c]{% объявляем новую команду для переноса строки внутри ячейки таблицы
+	\begin{tabular}[#1]{@{}c@{}}#2\end{tabular}}
+
+%гафика 
+\usepackage{pgf,tikz,pgfplots}
+\pgfplotsset{compat=1.15}
+\usepackage{tcolorbox}
+\usetikzlibrary{arrows,arrows.meta,patterns,shadings,shadows}
+\tcbuselibrary{skins,breakable}
