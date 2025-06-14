@@ -5,20 +5,19 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from typing import List, Optional
 from utils.logger import Logger
+import os
+from tqdm import tqdm
+from pycbrf.toolbox import ExchangeRates
 
 log = Logger(__name__).get_logger()
 
 
 def download_finam_quotes(
-    ticker: str,
-    period: int,
-    start: str,
-    end: str,
-    bucket_size: int = 100
+    ticker: str, period: int, start: str, end: str, bucket_size: int = 100
 ) -> pd.DataFrame:
     """
     Downloads historical market data from Finam and returns as DataFrame
-    
+
     Args:
         ticker: Instrument ticker (e.g. 'SBER')
         period: Timeframe from predefined values:
@@ -40,9 +39,15 @@ def download_finam_quotes(
         )
 
     period_deltas = {
-        2: timedelta(minutes=1), 3: timedelta(minutes=5), 4: timedelta(minutes=10),
-        5: timedelta(minutes=15), 6: timedelta(minutes=30), 7: timedelta(hours=1),
-        8: timedelta(days=1), 9: timedelta(weeks=1), 10: timedelta(days=30),
+        2: timedelta(minutes=1),
+        3: timedelta(minutes=5),
+        4: timedelta(minutes=10),
+        5: timedelta(minutes=15),
+        6: timedelta(minutes=30),
+        7: timedelta(hours=1),
+        8: timedelta(days=1),
+        9: timedelta(weeks=1),
+        10: timedelta(days=30),
     }
 
     if period not in period_deltas:
@@ -61,45 +66,47 @@ def download_finam_quotes(
         start_rev = current_start.strftime("%Y%m%d")
         end_rev = min(current_start + delta * bucket_size, end_date).strftime("%Y%m%d")
 
-        params = urlencode([
-            ('market', 0),    # Market type (0 - stocks)
-            ('em', tickers[ticker]),
-            ('code', ticker),
-            ('apply', 0),
-            ('df', current_start.day),
-            ('mf', current_start.month - 1),
-            ('yf', current_start.year),
-            ('from', current_start.date()),
-            ('dt', end_date.day),
-            ('mt', end_date.month - 1),
-            ('yt', end_date.year),
-            ('to', end_date.date()),
-            ('p', period),
-            ('f', f"{ticker}_{start_rev}_{end_rev}"),
-            ('e', ".csv"),
-            ('cn', ticker),
-            ('dtf', 1),        # Date format (1 - YYYYMMDD)
-            ('tmf', 1),        # Time format (1 - HHMMSS)
-            ('MSOR', 0),       # Candle time (0 - open; 1 - close)
-            ('mstime', "on"),  # Moscow time zone
-            ('mstimever', 1),
-            ('sep', 1),
-            ('sep2', 1),
-            ('datf', 1),
-            ('at', 1 if first_bucket else 0)
-        ])
+        params = urlencode(
+            [
+                ("market", 0),  # Market type (0 - stocks)
+                ("em", tickers[ticker]),
+                ("code", ticker),
+                ("apply", 0),
+                ("df", current_start.day),
+                ("mf", current_start.month - 1),
+                ("yf", current_start.year),
+                ("from", current_start.date()),
+                ("dt", end_date.day),
+                ("mt", end_date.month - 1),
+                ("yt", end_date.year),
+                ("to", end_date.date()),
+                ("p", period),
+                ("f", f"{ticker}_{start_rev}_{end_rev}"),
+                ("e", ".csv"),
+                ("cn", ticker),
+                ("dtf", 1),  # Date format (1 - YYYYMMDD)
+                ("tmf", 1),  # Time format (1 - HHMMSS)
+                ("MSOR", 0),  # Candle time (0 - open; 1 - close)
+                ("mstime", "on"),  # Moscow time zone
+                ("mstimever", 1),
+                ("sep", 1),
+                ("sep2", 1),
+                ("datf", 1),
+                ("at", 1 if first_bucket else 0),
+            ]
+        )
 
         url = f"http://export.finam.ru/{ticker}_{start_rev}_{end_rev}.csv?{params}"
 
         try:
             with urlopen(url) as response:
-                content = response.read().decode('utf-8')
-                lines = [line.split(',') for line in content.splitlines()]
+                content = response.read().decode("utf-8")
+                lines = [line.split(",") for line in content.splitlines()]
 
                 if not lines:
                     break
 
-                if lines[0][0] == 'Запрашиваемая вами глубина недоступна':
+                if lines[0][0] == "Запрашиваемая вами глубина недоступна":
                     current_start += delta
                     continue
 
@@ -110,8 +117,7 @@ def download_finam_quotes(
                     result_df = pd.concat([result_df, pd.DataFrame(lines[1:])])
 
                 last_date = datetime.strptime(
-                    f"{lines[-1][2]} {lines[-1][3]}",
-                    "%Y%m%d %H%M%S"
+                    f"{lines[-1][2]} {lines[-1][3]}", "%Y%m%d %H%M%S"
                 )
                 current_start = last_date + delta
 
@@ -128,11 +134,11 @@ def download_finam_quotes(
 
 
 def load_stock_data(
-        tickers_list: List[str],
-        start_date: str,
-        end_date: str,
-        step: int,
-        bucket_size: int = 10,
+    tickers_list: List[str],
+    start_date: str,
+    end_date: str,
+    step: int,
+    bucket_size: int = 10,
 ) -> Optional[pd.DataFrame]:
     """
     Loads historical stock data for multiple tickers from Finam and combines
@@ -201,76 +207,124 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
     """
 
     default_companies = [
-        'GAZP', 'LKOH', 'ROSN',
-        'SBER', 'VTBR', 'T',
-        'GMKN', 'NLMK', 'RUAL',
-        'MTSS', 'RTKM',
-        'MGNT', 'X5', 'LNTA',
+        "GAZP",
+        "LKOH",
+        "ROSN",
+        "SBER",
+        "VTBR",
+        "T",
+        "GMKN",
+        "NLMK",
+        "RUAL",
+        "MTSS",
+        "RTKM",
+        "MGNT",
+        "X5",
+        "LNTA",
     ]
     companies_list = default_companies if companies_list is None else companies_list
     multipliers = [
-        'P/E', 'P/FCF', 'P/S', 'P/BV', 'EV/EBITDA',
-        'Долг/EBITDA', 'Капитализация, млрд руб', 'Долг, млрд руб', 'Чистый долг, млрд руб'
+        "P/E",
+        "P/FCF",
+        "P/S",
+        "P/BV",
+        "EV/EBITDA",
+        "Долг/EBITDA",
+        "Капитализация, млрд руб",
+        "Долг, млрд руб",
+        "Чистый долг, млрд руб",
     ]
 
     macro = None
     for company in companies_list:
-        tmp = pd.read_csv(f'data/multiplicators/{company}.csv', sep=';')
-        tmp.columns = ['characteristic'] + list(tmp.columns)[1:]
+        tmp = pd.read_csv(f"data/multiplicators/{company}.csv", sep=";")
+        tmp.columns = ["characteristic"] + list(tmp.columns)[1:]
 
         tmp = (
-            tmp
-            .assign(temp=lambda x: 1 * tmp['characteristic'].isin(multipliers))
-            .query('temp == 1')
-            .drop(columns='temp')
+            tmp.assign(temp=lambda x: 1 * tmp["characteristic"].isin(multipliers))
+            .query("temp == 1")
+            .drop(columns="temp")
             .assign(company=company)
         )
 
         macro = tmp if macro is None else pd.concat([macro, tmp])
-    
+
     macro = macro.rename(
         columns={
-            f'{year}Q{q}': f'{year}_{q}' for year in range(2000, 2025) for q in range(1, 5)
+            f"{year}Q{q}": f"{year}_{q}"
+            for year in range(2000, 2025)
+            for q in range(1, 5)
         }
     )
 
     macro = macro[
-        ['company', 'characteristic'] 
+        ["company", "characteristic"]
         + [
-            f'{year}_{q}'
-            for year in range(2014, 2025) 
-            for q in range(1, 5) 
-            if f'{year}_{q}' in macro.columns
+            f"{year}_{q}"
+            for year in range(2014, 2025)
+            for q in range(1, 5)
+            if f"{year}_{q}" in macro.columns
         ]
     ]
-    
+
     return macro
 
 
+def get_rubusd_exchange_rate(
+    dt_calc: str, dt_start: str, update_backup: bool = False, use_backup: bool = False
+) -> pd.DataFrame:
+    rubusd_df_path = f"data/macro/rubusd.csv"
 
+    if use_backup:
+        if not os.path.exists(rubusd_df_path):
+            log.error(
+                f"Backup file for usd/rub exchange rates not found. Please, update it."
+            )
+            return
 
+        rates = pd.read_csv(rubusd_df_path)
+        log.info(
+            f"Exchange rates for usd/rub will be use from backup. Last actual date: {rates.date.max()}"
+        )
 
+        return rates
 
+    if os.path.exists(rubusd_df_path):
+        rates = pd.read_csv(rubusd_df_path)
+        start_date = rates.date.max()
+    else:
+        rates = None
+        start_date = dt_start
 
+    date_range = pd.date_range(
+        start=pd.to_datetime(start_date, format="%Y-%m-%d"),
+        end=pd.to_datetime(dt_calc, format="%Y-%m-%d"),
+        freq="D",
+    )
 
+    if start_date != dt_calc:
+        rates_additional = []
+        log.info(
+            f"Downloading new usd/rub exchange rates from {start_date} to {dt_calc}"
+        )
+        for date in tqdm(date_range):
+            rates_additional.append(
+                (date.strftime("%Y-%m-%d"), float(ExchangeRates(date)["USD"].value))
+            )
 
+        rates = (
+            pd.DataFrame(rates_additional, columns=["date", "rubusd_exchange_rate"])
+            if rates is None
+            else pd.concat(
+                [rates, pd.DataFrame(rates_additional, columns=rates.columns)]
+            )
+        )
 
+    if update_backup:
+        rates.to_csv(rubusd_df_path, index=False)
+        log.info(
+            f"Backup file for usd/rub exchange rates was updated."
+            f"New dates range: {rates.date.min()} : {rates.date.max()}"
+        )
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return rates
