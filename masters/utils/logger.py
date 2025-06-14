@@ -18,7 +18,7 @@ class Logger:
         _initialized (bool): Flag tracking initialization status
     """
 
-    _log_file: str = f"logs/app_{datetime.now()}.log"
+    _log_file: str = f"logs/app_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
     _initialized: bool = False
 
     def __init__(

@@ -5,6 +5,9 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from typing import List, Optional
 from utils.logger import Logger
+import os
+from tqdm import tqdm
+from pycbrf.toolbox import ExchangeRates
 
 log = Logger(__name__).get_logger()
 
@@ -245,6 +248,69 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
     ]
     
     return macro
+
+
+def get_rubusd_exchange_rate(
+        dt_calc: str,
+        dt_start: str,
+        update_backup: bool = False,
+        use_backup: bool = False
+) -> pd.DataFrame:
+    rubusd_df_path = f'data/macro/rubusd.csv'
+
+    if use_backup:
+        if not os.path.exists(rubusd_df_path):
+            log.error(f'Backup file for usd/rub exchange rates not found. Please, update it.')
+            return
+
+        rates = pd.read_csv(rubusd_df_path)
+        log.info(f'Exchange rates for usd/rub will be use from backup. Last actual date: {rates.date.max()}')
+
+        return rates
+
+
+    if os.path.exists(rubusd_df_path):
+        rates = pd.read_csv(rubusd_df_path)
+        start_date = rates.date.max()
+    else:
+        rates = None
+        start_date = dt_start
+
+    date_range = pd.date_range(
+        start=pd.to_datetime(start_date, format='%Y-%m-%d'),
+        end=pd.to_datetime(dt_calc, format='%Y-%m-%d'),
+        freq='D'
+    )
+
+    if start_date != dt_calc:
+        rates_additional = []
+        log.info(f'Downloading new usd/rub exchange rates from {start_date} to {dt_calc}')
+        for date in tqdm(date_range):
+            rates_additional.append(
+                (date.strftime('%Y-%m-%d'), float(ExchangeRates(date)['USD'].value))
+            )
+
+        rates = (
+            pd.DataFrame(rates_additional, columns=['date', 'rubusd_exchange_rate'])
+            if rates is None else
+            pd.concat(
+                [
+                    rates,
+                    pd.DataFrame(rates_additional, columns=rates.columns)
+                ]
+            )
+        )
+
+    if update_backup:
+        rates.to_csv(rubusd_df_path, index=False)
+        log.info(
+            f'Backup file for usd/rub exchange rates was updated.'
+            f'New dates range: {rates.date.min()} : {rates.date.max()}'
+        )
+
+    return rates
+
+
 
 
 

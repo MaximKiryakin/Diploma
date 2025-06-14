@@ -1,6 +1,6 @@
 
 
-from utils.load_data import load_stock_data, load_multipliers
+from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 from utils.logger import Logger
 import pickle
@@ -250,15 +250,16 @@ class Portfolio:
         # TODO create special loader for data
         unemployment = pd.read_excel("data/macro/unemployment.xlsx")
         inflation = pd.read_excel('data/macro/inflation.xlsx')
-        rub_usd = pd.read_excel("data/macro/rubusd.xlsx")
+        rub_usd = get_rubusd_exchange_rate(dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=True)
         inflation['date'] = pd.to_datetime(inflation["Дата"])
+        rub_usd['date'] = pd.to_datetime(rub_usd["date"])
 
         self.portfolio = (
             self.portfolio
             .merge(inflation, on="date", how="left")
             .merge(unemployment, left_on="year", right_on="Year", how="left")
-            .merge(rub_usd, left_on="date", right_on="data", how="left")
-            .drop(columns=['Дата', 'Цель по инфляции', 'data'])
+            .merge(rub_usd, on="date", how="left")
+            .drop(columns=['Дата', 'Цель по инфляции'])
         )
 
         self.portfolio = self.portfolio.rename(
@@ -288,7 +289,7 @@ class Portfolio:
         self.portfolio = self.portfolio.sort_values(by=['ticker', 'date'])
 
         missing = {}
-        columns_to_fill = ['debt', 'capitalization', 'usd_rub']
+        columns_to_fill = ['debt', 'capitalization', 'rubusd_exchange_rate']
         for col in columns_to_fill:
 
             missing[col] = self.portfolio[col].isna().sum() / self.portfolio.shape[0]
@@ -299,7 +300,7 @@ class Portfolio:
         log.info(
             f"Missing values share in: Debt ({np.round(missing['debt'],3)*100} %),"
             + f"Cap ({np.round(missing['capitalization'], 3)*100} %), "
-            + f"USD/RUB ({np.round(missing['usd_rub']*100, 1)} %)"
+            + f"USD/RUB ({np.round(missing['rubusd_exchange_rate']*100, 1)} %)"
         )
 
         log.info(f"Missing values filled in: {columns_to_fill}")
@@ -843,7 +844,7 @@ class Portfolio:
                         continue
 
                     y = np.log(df_target[target] + 1e-9)
-                    X = df_target[['inflation', 'unemployment_rate', 'usd_rub']]
+                    X = df_target[['inflation', 'unemployment_rate', 'rubusd_exchange_rate']]
 
                     X_train, X_test, y_train, y_test = train_test_split(
                         X, y, test_size=0.2, random_state=42
