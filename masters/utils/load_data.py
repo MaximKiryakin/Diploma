@@ -125,9 +125,10 @@ def download_finam_quotes(
             log.error(f"Download error for ticker {ticker}: {str(e)}")
             break
 
+    date = pd.to_datetime(result_df["<DATE>"])
     log.info(
         f"Downloaded dates range for ticker {ticker} : "
-        f"[{pd.to_datetime(result_df['<DATE>'].min())} : {pd.to_datetime(result_df['<DATE>'].max())}]"
+        f"[{date.min()} - {date.max()}]"
     )
 
     return result_df
@@ -284,7 +285,8 @@ def get_rubusd_exchange_rate(
 
         rates = pd.read_csv(rubusd_df_path)
         log.info(
-            f"Exchange rates for usd/rub will be use from backup. Last actual date: {rates.date.max()}"
+            f"Exchange rates for usd/rub will be use from backup."
+            f" Last actual date: {rates.date.max()}"
         )
 
         return rates
@@ -322,6 +324,7 @@ def get_rubusd_exchange_rate(
 
     if update_backup:
         rates.to_csv(rubusd_df_path, index=False)
+
         log.info(
             f"Backup file for usd/rub exchange rates was updated."
             f"New dates range: {rates.date.min()} : {rates.date.max()}"
