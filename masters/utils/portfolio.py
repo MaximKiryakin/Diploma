@@ -1,5 +1,3 @@
-
-
 from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 from utils.logger import Logger
@@ -28,7 +26,9 @@ log = Logger(__name__).get_logger()
 
 
 class Portfolio:
-    def __init__(self, dt_calc: str, dt_start: str, stocks_step: int, tickers_list: list[str]):
+    def __init__(
+        self, dt_calc: str, dt_start: str, stocks_step: int, tickers_list: list[str]
+    ):
         self.dt_calc = dt_calc
         self.dt_start = dt_start
         self.stocks_step = stocks_step
@@ -50,9 +50,11 @@ class Portfolio:
 
         self.start_time = datetime.now()
 
-        log.info("="*60)
-        log.info(f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}")
-        log.info("="*60)
+        log.info("=" * 60)
+        log.info(
+            f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}"
+        )
+        log.info("=" * 60)
 
         return self
 
@@ -66,18 +68,21 @@ class Portfolio:
 
         self.end_time = datetime.now()
 
-        log.info("="*60)
-        log.info("ANALYSIS COMPLETED | Duration: %.1f sec", (self.end_time - self.start_time).total_seconds())
-        log.info("="*60)
+        log.info("=" * 60)
+        log.info(
+            "ANALYSIS COMPLETED | Duration: %.1f sec",
+            (self.end_time - self.start_time).total_seconds(),
+        )
+        log.info("=" * 60)
 
         return self
 
     def load_stock_data(
-            self,
-            tickers_list: list[str] = None,
-            use_backup_data: bool = False,
-            create_backup: bool = False,
-            backup_path: str = "data/backup/stocks.pkl"
+        self,
+        tickers_list: list[str] = None,
+        use_backup_data: bool = False,
+        create_backup: bool = False,
+        backup_path: str = "data/backup/stocks.pkl",
     ) -> "Portfolio":
         """
         Loads stock data for the given tickers.
@@ -95,35 +100,40 @@ class Portfolio:
         if use_backup_data:
             if not os.path.isfile(backup_path):
                 log.error(f"Backup file was not found: {backup_path}")
-                raise Exception   # TODO specify exception list for this project
+                raise Exception  # TODO specify exception list for this project
 
-            with open(backup_path, 'rb') as f:
+            with open(backup_path, "rb") as f:
                 self.stocks = pickle.load(f)
 
-            log.info("Stocks data loaded from backup | Records: %d", self.stocks.shape[0])
+            log.info(
+                "Stocks data loaded from backup | Records: %d", self.stocks.shape[0]
+            )
         else:
             self.stocks = load_stock_data(
-                tickers_list=self.tickers_list if tickers_list is None else tickers_list,
+                tickers_list=(
+                    self.tickers_list if tickers_list is None else tickers_list
+                ),
                 start_date=self.dt_start,
                 end_date=self.dt_calc,
-                step=self.stocks_step
+                step=self.stocks_step,
             )
 
             log.info(f"Stocks data was loaded from finam")
 
         if create_backup:
-            with open(backup_path, 'wb') as f:
+            with open(backup_path, "wb") as f:
                 pickle.dump(self.stocks, f)
 
             log.info(f"Backup file was saved: {backup_path}")
 
         self.stocks = (
-            self.stocks
-            .rename(columns={col: col[1:-1].lower() for col in self.stocks.columns})
-            .assign(date=lambda x: pd.to_datetime(x['date']) + pd.offsets.MonthEnd(0))
-            .assign(quarter=lambda x: pd.to_datetime(x['date']).dt.quarter)
-            .assign(year=lambda x: pd.to_datetime(x['date']).dt.year)
-            .drop(columns=['per', 'vol'])
+            self.stocks.rename(
+                columns={col: col[1:-1].lower() for col in self.stocks.columns}
+            )
+            .assign(date=lambda x: pd.to_datetime(x["date"]) + pd.offsets.MonthEnd(0))
+            .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
+            .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
+            .drop(columns=["per", "vol"])
         )
 
         return self
@@ -146,19 +156,23 @@ class Portfolio:
         self.multipliers = (
             pd.melt(
                 self.multipliers,
-                id_vars=['company', 'characteristic'],
-                var_name='year_quarter',
-                value_name='value'
+                id_vars=["company", "characteristic"],
+                var_name="year_quarter",
+                value_name="value",
             )
-            .assign(year=lambda x: x['year_quarter'].str.split('_', expand=True)[0])
-            .assign(quarter=lambda x: x['year_quarter'].str.split('_', expand=True)[1])
-            .drop('year_quarter', axis=1).astype({'year': int, 'quarter': int})
-            .set_index(['company', 'year', 'quarter', 'characteristic'])['value']
-            .unstack().reset_index()
-            .rename(columns={'company': 'ticker'})
+            .assign(year=lambda x: x["year_quarter"].str.split("_", expand=True)[0])
+            .assign(quarter=lambda x: x["year_quarter"].str.split("_", expand=True)[1])
+            .drop("year_quarter", axis=1)
+            .astype({"year": int, "quarter": int})
+            .set_index(["company", "year", "quarter", "characteristic"])["value"]
+            .unstack()
+            .reset_index()
+            .rename(columns={"company": "ticker"})
         )
 
-        log.info("Multipliers data loaded | Features: %s", list(self.multipliers.columns))
+        log.info(
+            "Multipliers data loaded | Features: %s", list(self.multipliers.columns)
+        )
 
         return self
 
@@ -170,11 +184,13 @@ class Portfolio:
             Portfolio: Created portfolio.
         """
 
-        self.portfolio = (
-            self.stocks.merge(self.multipliers, on=['ticker', 'year', 'quarter'], how='left')
+        self.portfolio = self.stocks.merge(
+            self.multipliers, on=["ticker", "year", "quarter"], how="left"
         )
 
-        log.info("Portfolio created | Companies: %d", len(self.portfolio.ticker.unique()))
+        log.info(
+            "Portfolio created | Companies: %d", len(self.portfolio.ticker.unique())
+        )
 
         return self
 
@@ -187,52 +203,59 @@ class Portfolio:
         """
 
         columns_new_names = {
-            'Долг, млрд руб': 'debt',
-            'Капитализация, млрд руб': 'capitalization'
+            "Долг, млрд руб": "debt",
+            "Капитализация, млрд руб": "capitalization",
         }
 
         column_to_adjust = [
-            'Долг, млрд руб', 'Капитализация, млрд руб',
-            'Чистый долг, млрд руб', 'high', 'low', 'close',
-            'EV/EBITDA', 'P/BV', 'P/E', 'P/S', 'open', 'Долг/EBITDA'
+            "Долг, млрд руб",
+            "Капитализация, млрд руб",
+            "Чистый долг, млрд руб",
+            "high",
+            "low",
+            "close",
+            "EV/EBITDA",
+            "P/BV",
+            "P/E",
+            "P/S",
+            "open",
+            "Долг/EBITDA",
         ]
 
         for col in column_to_adjust:
             self.portfolio[col] = self.portfolio[col].str.replace(" ", "", regex=False)
             self.portfolio[col] = pd.to_numeric(self.portfolio[col], errors="coerce")
-            if 'млрд руб' in col:
+            if "млрд руб" in col:
                 self.portfolio[col] *= 1e9
 
-        self.portfolio['Долг, млрд руб'] = np.select(
+        self.portfolio["Долг, млрд руб"] = np.select(
             [
-                (self.portfolio['Долг, млрд руб'].notna())
-                & (self.portfolio['Долг, млрд руб'].ne(0)),
-
-                (self.portfolio['Долг, млрд руб'].isna())
-                & ((self.portfolio['Чистый долг, млрд руб'].isna())
-                | (self.portfolio['Чистый долг, млрд руб'].eq(0))),
-
-                (self.portfolio['Долг, млрд руб'].isna())
-                & (self.portfolio['Чистый долг, млрд руб'].notna())
-                & (self.portfolio['Чистый долг, млрд руб'].ne(0))
+                (self.portfolio["Долг, млрд руб"].notna())
+                & (self.portfolio["Долг, млрд руб"].ne(0)),
+                (self.portfolio["Долг, млрд руб"].isna())
+                & (
+                    (self.portfolio["Чистый долг, млрд руб"].isna())
+                    | (self.portfolio["Чистый долг, млрд руб"].eq(0))
+                ),
+                (self.portfolio["Долг, млрд руб"].isna())
+                & (self.portfolio["Чистый долг, млрд руб"].notna())
+                & (self.portfolio["Чистый долг, млрд руб"].ne(0)),
             ],
             [
-                self.portfolio['Долг, млрд руб'],
-                self.portfolio['Долг, млрд руб'],
-                self.portfolio['Чистый долг, млрд руб']
-            ]
+                self.portfolio["Долг, млрд руб"],
+                self.portfolio["Долг, млрд руб"],
+                self.portfolio["Чистый долг, млрд руб"],
+            ],
         )
 
-        self.portfolio['Долг, млрд руб'] = np.where(
-            self.portfolio['Долг, млрд руб'] < 0,
-                np.abs(self.portfolio['Долг, млрд руб']),
-            self.portfolio['Долг, млрд руб']
+        self.portfolio["Долг, млрд руб"] = np.where(
+            self.portfolio["Долг, млрд руб"] < 0,
+            np.abs(self.portfolio["Долг, млрд руб"]),
+            self.portfolio["Долг, млрд руб"],
         )
 
-        self.portfolio = (
-            self.portfolio
-            .rename(columns=columns_new_names)
-            .drop(columns=['Чистый долг, млрд руб'])
+        self.portfolio = self.portfolio.rename(columns=columns_new_names).drop(
+            columns=["Чистый долг, млрд руб"]
         )
 
         log.info("Column types adjusted: %s", column_to_adjust)
@@ -249,32 +272,35 @@ class Portfolio:
 
         # TODO create special loader for data
         unemployment = pd.read_excel("data/macro/unemployment.xlsx")
-        inflation = pd.read_excel('data/macro/inflation.xlsx')
-        rub_usd = get_rubusd_exchange_rate(dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=True)
-        inflation['date'] = pd.to_datetime(inflation["Дата"])
-        rub_usd['date'] = pd.to_datetime(rub_usd["date"])
+        inflation = pd.read_excel("data/macro/inflation.xlsx")
+        rub_usd = get_rubusd_exchange_rate(
+            dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=True
+        )
+        inflation["date"] = pd.to_datetime(inflation["Дата"])
+        rub_usd["date"] = pd.to_datetime(rub_usd["date"])
 
         self.portfolio = (
-            self.portfolio
-            .merge(inflation, on="date", how="left")
+            self.portfolio.merge(inflation, on="date", how="left")
             .merge(unemployment, left_on="year", right_on="Year", how="left")
             .merge(rub_usd, on="date", how="left")
-            .drop(columns=['Дата', 'Цель по инфляции'])
+            .drop(columns=["Дата", "Цель по инфляции"])
         )
 
         self.portfolio = self.portfolio.rename(
             columns={
-                'Ключевая ставка, % годовых': 'interest_rate',
-                'Инфляция, % г/г': 'inflation',
-                'Unemployment': 'unemployment_rate',
-                'curs': 'usd_rub'
+                "Ключевая ставка, % годовых": "interest_rate",
+                "Инфляция, % г/г": "inflation",
+                "Unemployment": "unemployment_rate",
+                "curs": "usd_rub",
             }
         )
 
-        for col in ['inflation', 'interest_rate', 'unemployment_rate']:
+        for col in ["inflation", "interest_rate", "unemployment_rate"]:
             self.portfolio[col] /= 100
 
-        log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
+        log.info(
+            "Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB"
+        )
 
         return self
 
@@ -286,14 +312,14 @@ class Portfolio:
             Portfolio: Updated portfolio with missing values filled.
         """
 
-        self.portfolio = self.portfolio.sort_values(by=['ticker', 'date'])
+        self.portfolio = self.portfolio.sort_values(by=["ticker", "date"])
 
         missing = {}
-        columns_to_fill = ['debt', 'capitalization', 'rubusd_exchange_rate']
+        columns_to_fill = ["debt", "capitalization", "rubusd_exchange_rate"]
         for col in columns_to_fill:
 
             missing[col] = self.portfolio[col].isna().sum() / self.portfolio.shape[0]
-            self.portfolio[col] = self.portfolio.groupby('ticker')[col].transform(
+            self.portfolio[col] = self.portfolio.groupby("ticker")[col].transform(
                 lambda x: x.ffill().bfill()
             )
 
@@ -307,10 +333,7 @@ class Portfolio:
 
         return self
 
-    def _solve_merton_vectorized(
-        self,
-        T: float = 1
-    ) -> "Portfolio":
+    def _solve_merton_vectorized(self, T: float = 1) -> "Portfolio":
         """
         Solves the system of equations to estimate V and sigma_V.
 
@@ -323,14 +346,18 @@ class Portfolio:
 
         E = self.portfolio["capitalization"].values.astype(float)
         D = self.portfolio["debt"].values.astype(float)
-        sigma_E = self.portfolio['quarterly_volatility'].values.astype(float)
+        sigma_E = self.portfolio["quarterly_volatility"].values.astype(float)
 
         def equations(vars, E_i, D_i, r_i, sigma_E_i, T_i):
             V, sigma_V = vars
             d1 = np.log(V / D_i if D_i != 0 else 1e-6) + (r_i + 0.5 * sigma_V**2) * T_i
-            d1 /= (sigma_V * np.sqrt(T_i))
+            d1 /= sigma_V * np.sqrt(T_i)
             N_d1 = norm.cdf(d1)
-            eq1 = V * N_d1 - D_i * np.exp(-r_i * T_i) * norm.cdf(d1 - sigma_V * np.sqrt(T_i)) - E_i
+            eq1 = (
+                V * N_d1
+                - D_i * np.exp(-r_i * T_i) * norm.cdf(d1 - sigma_V * np.sqrt(T_i))
+                - E_i
+            )
             eq2 = N_d1 * sigma_V * V - sigma_E_i * E_i
             return [eq1, eq2]
 
@@ -338,22 +365,31 @@ class Portfolio:
         initial_guess = np.vstack([E + D, sigma_E]).T
 
         # Solve for each element
-        results = np.array([
-            root(equations, guess, args=(E[i], D[i], self.portfolio['interest_rate'][i], sigma_E[i], T)).x
-            for i, guess in enumerate(initial_guess)
-        ])
+        results = np.array(
+            [
+                root(
+                    equations,
+                    guess,
+                    args=(
+                        E[i],
+                        D[i],
+                        self.portfolio["interest_rate"][i],
+                        sigma_E[i],
+                        T,
+                    ),
+                ).x
+                for i, guess in enumerate(initial_guess)
+            ]
+        )
 
-        self.portfolio['V'] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
-        self.portfolio['sigma_V'] = results[:, 1]
+        self.portfolio["V"] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
+        self.portfolio["sigma_V"] = results[:, 1]
 
         log.info(f"Capital cost and capital volatility calculated.")
 
         return self
 
-    def _merton_pd(
-        self,
-        T: float = 1
-    ) -> "Portfolio":
+    def _merton_pd(self, T: float = 1) -> "Portfolio":
         """
         Calculates the probability of default (PD) using the Merton model.
 
@@ -364,12 +400,15 @@ class Portfolio:
             Portfolio: Updated portfolio with calculated probabilities of default.
         """
 
-        V = self.portfolio['V'].values.astype(float)
+        V = self.portfolio["V"].values.astype(float)
         D = self.portfolio["debt"].values.astype(float)
-        sigma_V = self.portfolio['sigma_V']
+        sigma_V = self.portfolio["sigma_V"]
 
-        d2 = (np.log(V / np.where(D != 0, D, 1e-6)) + (self.portfolio['interest_rate'] - 0.5 * sigma_V**2) * T) / (sigma_V * np.sqrt(T))
-        self.portfolio['PD'] = norm.cdf(-d2)
+        d2 = (
+            np.log(V / np.where(D != 0, D, 1e-6))
+            + (self.portfolio["interest_rate"] - 0.5 * sigma_V**2) * T
+        ) / (sigma_V * np.sqrt(T))
+        self.portfolio["PD"] = norm.cdf(-d2)
 
         log.info(f"Merton's probabilities of default calculated.")
 
@@ -384,15 +423,12 @@ class Portfolio:
         """
         self = self._solve_merton_vectorized()._merton_pd()
 
-        self.portfolio = self.portfolio.drop(columns=['V', 'sigma_V'])
+        self.portfolio = self.portfolio.drop(columns=["V", "sigma_V"])
 
         return self
 
     def plot_pd_by_tickers(
-        self,
-        tickers: list,
-        figsize: tuple = (10, 4),
-        verbose: bool = False
+        self, tickers: list, figsize: tuple = (10, 4), verbose: bool = False
     ) -> "Portfolio":
         """
         Plots the probability of default (PD) for the given tickers.
@@ -410,7 +446,7 @@ class Portfolio:
 
         for ticker in tickers:
 
-            save_path = f'logs/graphs/{ticker}_pd.png'
+            save_path = f"logs/graphs/{ticker}_pd.png"
 
             data = self.portfolio.query(f"ticker == '{ticker}'")
 
@@ -421,23 +457,23 @@ class Portfolio:
             fig, ax = plt.subplots(figsize=figsize)
 
             ax.plot(
-                data['date'],
-                data['PD'] * 100,
-                marker='o',
-                linestyle='--',
-                color='royalblue',
+                data["date"],
+                data["PD"] * 100,
+                marker="o",
+                linestyle="--",
+                color="royalblue",
                 linewidth=2,
-                markersize=5
+                markersize=5,
             )
 
-            ax.set_title(f'Вероятность дефолта ({ticker})', fontsize=14, pad=20)
-            ax.set_xlabel('Дата', fontsize=12)
-            ax.set_ylabel('PD, %', fontsize=12)
+            ax.set_title(f"Вероятность дефолта ({ticker})", fontsize=14, pad=20)
+            ax.set_xlabel("Дата", fontsize=12)
+            ax.set_ylabel("PD, %", fontsize=12)
 
             plt.tight_layout()
 
             if save_path:
-                plt.savefig(save_path, bbox_inches='tight', facecolor="white")
+                plt.savefig(save_path, bbox_inches="tight", facecolor="white")
 
             if verbose:
                 plt.show()
@@ -455,11 +491,11 @@ class Portfolio:
         return self
 
     def calc_irf(
-            self,
-            impulses_responses: Dict[str, str] = None,
-            figsize: Tuple[int, int] = (10, 4),
-            verbose: bool = False
-        ) -> "Portfolio":
+        self,
+        impulses_responses: Dict[str, str] = None,
+        figsize: Tuple[int, int] = (10, 4),
+        verbose: bool = False,
+    ) -> "Portfolio":
         """
         Calculates impulse response functions for the given impulses and responses.
 
@@ -475,7 +511,9 @@ class Portfolio:
         if impulses_responses is None:
             raise ValueError("Impulses and responses must be specified")
 
-        columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
+        columns = np.unique(
+            list(impulses_responses.keys()) + list(impulses_responses.values())
+        )
 
         data = self.portfolio.sort_values(["ticker", "date"])[columns].dropna()[columns]
 
@@ -502,9 +540,11 @@ class Portfolio:
         lag_order = model.select_order(maxlags=6)
         selected_lags = lag_order.aic
 
-        log.info(f'Optimal lag number calculated | Optimal number of lags: {selected_lags}')
+        log.info(
+            f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
+        )
 
-        results = model.fit(maxlags=selected_lags, ic='aic')
+        results = model.fit(maxlags=selected_lags, ic="aic")
 
         for impulse, response in impulses_responses.items():
             irf = results.irf(periods=selected_lags)
@@ -514,29 +554,27 @@ class Portfolio:
                 response=response,
                 orth=True,
                 figsize=figsize,
-                plot_params={
-                    'title': None,
-                    'subtitle': False
-                }
+                plot_params={"title": None, "subtitle": False},
             )
 
             fig = ax.get_figure()
 
-            fig.suptitle('')
+            fig.suptitle("")
             for a in fig.axes:
-                a.set_title('')
+                a.set_title("")
 
             fig.suptitle(
                 f"Impulse Response Function (IRF): {impulse} → {response}\n"
                 f"Method: VAR with AIC lag selection | 95% Confidence Intervals",
-                fontsize=11, y=1.02
+                fontsize=11,
+                y=1.02,
             )
 
-            plt.xlabel('Горизонт, кварталы')
-            plt.ylabel('Изменение PD, базисные пункты')
+            plt.xlabel("Горизонт, кварталы")
+            plt.ylabel("Изменение PD, базисные пункты")
 
-            save_path = f'logs/graphs/irf_{impulse}_{response}.png'
-            plt.savefig(save_path, bbox_inches='tight', facecolor="white")
+            save_path = f"logs/graphs/irf_{impulse}_{response}.png"
+            plt.savefig(save_path, bbox_inches="tight", facecolor="white")
 
             if verbose:
                 plt.show()
@@ -555,7 +593,7 @@ class Portfolio:
         figsize: tuple = (15, 10),
         dpi: int = 300,
         annot_size: int = 8,
-        verbose: bool = False
+        verbose: bool = False,
     ) -> "Portfolio":
         """
         Plots and saves the correlation matrix of stock closing prices.
@@ -573,15 +611,13 @@ class Portfolio:
         """
 
         if save_path is None:
-            save_path = f'logs/graphs/corr_matrix.png'
+            save_path = f"logs/graphs/corr_matrix.png"
 
         pivot_data = self.portfolio.pivot_table(
-            index='date',
-            columns='ticker',
-            values='close'
+            index="date", columns="ticker", values="close"
         )
 
-        pivot_data = pivot_data.interpolate(method='time', limit_direction='both')
+        pivot_data = pivot_data.interpolate(method="time", limit_direction="both")
         valid_tickers = [t for t in custom_order if t in pivot_data.columns]
 
         if not valid_tickers:
@@ -600,21 +636,21 @@ class Portfolio:
             fmt=".2f",
             cmap="coolwarm",
             linewidths=0.5,
-            annot_kws={"size": annot_size}
+            annot_kws={"size": annot_size},
         )
 
         for pos in sector_breaks:
-            plt.axvline(pos, color='black', linewidth=2)
-            plt.axhline(pos, color='black', linewidth=2)
+            plt.axvline(pos, color="black", linewidth=2)
+            plt.axhline(pos, color="black", linewidth=2)
 
         plt.title("Корреляция цен закрытия акций", fontsize=14)
-        plt.xticks(rotation=45, ha='right')
+        plt.xticks(rotation=45, ha="right")
         plt.yticks(rotation=0)
         plt.tight_layout()
 
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor="white")
+            plt.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor="white")
             log.info(f"Correlation matrix saved | Path: {save_path}")
 
         if verbose:
@@ -647,9 +683,9 @@ class Portfolio:
 
         for ticker in tickers:
 
-            stock_data = self.portfolio[self.portfolio['ticker'] == ticker]
+            stock_data = self.portfolio[self.portfolio["ticker"] == ticker]
 
-            save_path = f'logs/graphs/{ticker}_stock.png'
+            save_path = f"logs/graphs/{ticker}_stock.png"
 
             if stock_data.empty:
                 raise ValueError(f"Ticker {ticker} not found in portfolio")
@@ -657,32 +693,29 @@ class Portfolio:
             fig, ax = plt.subplots(figsize=figsize)
 
             ax.plot(
-                stock_data['date'],
-                stock_data['close'],
-                label='Closing price',
-                color='royalblue',
-                linewidth=2
+                stock_data["date"],
+                stock_data["close"],
+                label="Closing price",
+                color="royalblue",
+                linewidth=2,
             )
 
-            ax.set_title(f'Stock dynamics {ticker}', fontsize=fontsize, pad=20)
-            ax.set_xlabel('Date')
-            ax.set_ylabel('Price, RUB',)
-            ax.legend(frameon=True, facecolor='white')
+            ax.set_title(f"Stock dynamics {ticker}", fontsize=fontsize, pad=20)
+            ax.set_xlabel("Date")
+            ax.set_ylabel(
+                "Price, RUB",
+            )
+            ax.legend(frameon=True, facecolor="white")
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
             ax.xaxis.set_major_locator(mdates.MonthLocator(interval=7))
             plt.xticks(rotation=0)
 
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
-    
+
             if save_path:
-                plt.savefig(
-                    save_path,
-                    dpi=100,
-                    bbox_inches='tight',
-                    facecolor='white'
-                )
+                plt.savefig(save_path, dpi=100, bbox_inches="tight", facecolor="white")
 
             if verbose:
                 plt.show()
@@ -707,20 +740,23 @@ class Portfolio:
             Portfolio: Updated portfolio with added dynamic features.
         """
 
-        self.portfolio['quarterly_volatility'] = (
-            self.portfolio
-            .groupby(['ticker', pd.Grouper(key='date', freq='QE')])['close']
-            .transform(
-                lambda x: np.std(np.log(x / x.shift(1))) * np.sqrt(63)  # 63 ≈ среднее число торговых дней в квартале
-            )
+        self.portfolio["quarterly_volatility"] = self.portfolio.groupby(
+            ["ticker", pd.Grouper(key="date", freq="QE")]
+        )["close"].transform(
+            lambda x: np.std(np.log(x / x.shift(1)))
+            * np.sqrt(63)  # 63 ≈ среднее число торговых дней в квартале
         )
 
-        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].rolling(window=10).mean()
+        self.portfolio["quarterly_volatility"] = (
+            self.portfolio["quarterly_volatility"].rolling(window=10).mean()
+        )
 
-        self.portfolio['quarterly_volatility'] = self.portfolio['quarterly_volatility'].bfill()
+        self.portfolio["quarterly_volatility"] = self.portfolio[
+            "quarterly_volatility"
+        ].bfill()
 
         # Adhoc values for missing quarterly volatility data
-        self.portfolio['quarterly_volatility'] = 0.4
+        self.portfolio["quarterly_volatility"] = 0.4
 
         return self
 
@@ -736,38 +772,52 @@ class Portfolio:
             Portfolio: Updated portfolio with plotted capitalization and debt.
         """
 
-        save_path = f'logs/graphs/debt_catitalization.png'
-        grouped = self.portfolio.groupby('ticker')
+        save_path = f"logs/graphs/debt_catitalization.png"
+        grouped = self.portfolio.groupby("ticker")
 
         for ticker, group in grouped:
 
-            group = group.sort_values('date').dropna(subset=['capitalization', 'debt'])
+            group = group.sort_values("date").dropna(subset=["capitalization", "debt"])
             plt.figure(figsize=figsize)
 
-            plt.plot(group['date'], group['capitalization'],
-                    marker='o', linestyle='-', color='#2ecc71', linewidth=2,
-                    markersize=8, label='Capitalization')
+            plt.plot(
+                group["date"],
+                group["capitalization"],
+                marker="o",
+                linestyle="-",
+                color="#2ecc71",
+                linewidth=2,
+                markersize=8,
+                label="Capitalization",
+            )
 
-            plt.plot(group['date'], group['debt'],
-                    marker='s', linestyle='--', color='#e74c3c', linewidth=2,
-                    markersize=8, label='Debt')
+            plt.plot(
+                group["date"],
+                group["debt"],
+                marker="s",
+                linestyle="--",
+                color="#e74c3c",
+                linewidth=2,
+                markersize=8,
+                label="Debt",
+            )
 
-            plt.title(f'{ticker}: Capitalization vs Debt', fontsize=14, pad=20)
-            plt.xlabel('Date', fontsize=12)
-            plt.ylabel('Value', fontsize=12)
+            plt.title(f"{ticker}: Capitalization vs Debt", fontsize=14, pad=20)
+            plt.xlabel("Date", fontsize=12)
+            plt.ylabel("Value", fontsize=12)
             plt.grid(True, alpha=0.3)
 
             plt.legend(
-                loc='upper left',
+                loc="upper left",
                 frameon=True,
                 shadow=True,
                 fontsize=12,
-                facecolor='white'
+                facecolor="white",
             )
 
             plt.tight_layout()
 
-            plt.savefig(save_path, bbox_inches='tight', dpi=100)
+            plt.savefig(save_path, bbox_inches="tight", dpi=100)
 
             if verbose:
                 plt.show()
@@ -785,10 +835,7 @@ class Portfolio:
         return self
 
     def calc_macro_connections(
-        self,
-        min_samples: int = 10,
-        n_bootstraps: int = 500,
-        conf_level: int = 95
+        self, min_samples: int = 10, n_bootstraps: int = 500, conf_level: int = 95
     ) -> "Portfolio":
         """
         Calculates macroeconomic connections for the given portfolio.
@@ -803,48 +850,52 @@ class Portfolio:
         """
 
         df = self.portfolio.copy()
-        targets = ['debt', 'capitalization']
+        targets = ["debt", "capitalization"]
 
         results = []
 
-        tickers = df['ticker'].unique()
+        tickers = df["ticker"].unique()
 
         def format_ci(low, high):
             return f"[{low:.3f}, {high:.3f}]"
 
         for ticker in tickers:
 
-            df_ticker = df[df['ticker'] == ticker].copy()
+            df_ticker = df[df["ticker"] == ticker].copy()
 
             if len(df_ticker) < min_samples:
                 continue
 
             for target in targets:
                 record = {
-                    'ticker': ticker,
-                    'target': target,
-                    'best_alpha': np.nan,
-                    'mse_model': np.nan,
-                    'mse_baseline': np.nan,
-                    'r2': np.nan,
-                    'coef_inflation': np.nan,
-                    'coef_inflation_ci': np.nan,
-                    'coef_unemployment': np.nan,
-                    'coef_unemployment_ci': np.nan,
-                    'coef_usd_rub': np.nan,
-                    'coef_usd_rub_ci': np.nan
+                    "ticker": ticker,
+                    "target": target,
+                    "best_alpha": np.nan,
+                    "mse_model": np.nan,
+                    "mse_baseline": np.nan,
+                    "r2": np.nan,
+                    "coef_inflation": np.nan,
+                    "coef_inflation_ci": np.nan,
+                    "coef_unemployment": np.nan,
+                    "coef_unemployment_ci": np.nan,
+                    "coef_usd_rub": np.nan,
+                    "coef_usd_rub_ci": np.nan,
                 }
 
                 try:
                     Q1 = df_ticker[target].quantile(0.05)
                     Q3 = df_ticker[target].quantile(0.95)
-                    df_target = df_ticker[(df_ticker[target] >= Q1) & (df_ticker[target] <= Q3)].copy()
+                    df_target = df_ticker[
+                        (df_ticker[target] >= Q1) & (df_ticker[target] <= Q3)
+                    ].copy()
 
                     if len(df_target) < 5:
                         continue
 
                     y = np.log(df_target[target] + 1e-9)
-                    X = df_target[['inflation', 'unemployment_rate', 'rubusd_exchange_rate']]
+                    X = df_target[
+                        ["inflation", "unemployment_rate", "rubusd_exchange_rate"]
+                    ]
 
                     X_train, X_test, y_train, y_test = train_test_split(
                         X, y, test_size=0.2, random_state=42
@@ -863,9 +914,9 @@ class Portfolio:
                     ridge = Ridge()
                     grid = GridSearchCV(
                         ridge,
-                        {'alpha': np.logspace(-3, 2, 50)},
+                        {"alpha": np.logspace(-3, 2, 50)},
                         cv=5,
-                        scoring='neg_mean_squared_error'
+                        scoring="neg_mean_squared_error",
                     )
                     grid.fit(X_train_scaled, y_train)
                     best_model = grid.best_estimator_
@@ -874,7 +925,7 @@ class Portfolio:
                     coefs = []
                     for _ in range(n_bootstraps):
                         X_bs, y_bs = resample(X_train_scaled, y_train)
-                        model = Ridge(alpha=grid.best_params_['alpha'])
+                        model = Ridge(alpha=grid.best_params_["alpha"])
                         model.fit(X_bs, y_bs)
                         coefs.append(model.coef_)
 
@@ -883,25 +934,29 @@ class Portfolio:
                     coefs = np.array(coefs)
 
                     low_inf, high_inf = np.percentile(coefs[:, 0], [ci_low, ci_high])
-                    low_unemp, high_unemp = np.percentile(coefs[:, 1], [ci_low, ci_high])
+                    low_unemp, high_unemp = np.percentile(
+                        coefs[:, 1], [ci_low, ci_high]
+                    )
                     low_usd, high_usd = np.percentile(coefs[:, 2], [ci_low, ci_high])
 
                     ci_inflation = format_ci(low_inf, high_inf)
                     ci_unemployment = format_ci(low_unemp, high_unemp)
                     ci_usd_rub = format_ci(low_usd, high_usd)
 
-                    record.update({
-                        'best_alpha': grid.best_params_['alpha'],
-                        'mse_model': mean_squared_error(y_test, y_pred),
-                        'mse_baseline': mse_baseline,
-                        'r2': r2_score(y_test, y_pred),
-                        'coef_inflation': best_model.coef_[0],
-                        'coef_inflation_ci': ci_inflation,
-                        'coef_unemployment': best_model.coef_[1],
-                        'coef_unemployment_ci': ci_unemployment,
-                        'coef_usd_rub': best_model.coef_[2],
-                        'coef_usd_rub_ci': ci_usd_rub
-                    })
+                    record.update(
+                        {
+                            "best_alpha": grid.best_params_["alpha"],
+                            "mse_model": mean_squared_error(y_test, y_pred),
+                            "mse_baseline": mse_baseline,
+                            "r2": r2_score(y_test, y_pred),
+                            "coef_inflation": best_model.coef_[0],
+                            "coef_inflation_ci": ci_inflation,
+                            "coef_unemployment": best_model.coef_[1],
+                            "coef_unemployment_ci": ci_unemployment,
+                            "coef_usd_rub": best_model.coef_[2],
+                            "coef_usd_rub_ci": ci_usd_rub,
+                        }
+                    )
 
                 except Exception as e:
                     log.error(f"Ошибка для {ticker}-{target}: {str(e)}")
@@ -910,7 +965,7 @@ class Portfolio:
                 results.append(record)
 
         result_df = pd.DataFrame(results)
-        result_df = result_df.dropna(subset=['best_alpha'])
+        result_df = result_df.dropna(subset=["best_alpha"])
 
         self.macro_connection_summary = result_df
         log.info("Macro connection summary calculated.")

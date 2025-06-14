@@ -1,0 +1,6 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 25.1.0  # Укажите актуальную версию black (см. https://github.com/psf/black/releases)
+    hooks:
+      - id: black
+        language_version: python3  # Или ваша версия Python (например, python3.9)

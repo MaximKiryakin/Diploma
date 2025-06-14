@@ -3,16 +3,17 @@ import sys
 import os
 from datetime import datetime
 
-logging.getLogger('matplotlib').setLevel(logging.ERROR)
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
+
 
 class Logger:
     """
     A wrapper class for standard logging with shared file output.
-    
+
     This logger ensures all instances write to the same log file and provides
     consistent formatting across the application. It automatically creates
     the log directory if it doesn't exist.
-    
+
     Attributes:
         _log_file (str): Shared log file path for all instances
         _initialized (bool): Flag tracking initialization status
@@ -22,10 +23,10 @@ class Logger:
     _initialized: bool = False
 
     def __init__(
-            self,
-            name: str,
-            level: int = logging.INFO,
-            format: str = "%(asctime)s:%(name)s:%(levelname)s: %(message)s",
+        self,
+        name: str,
+        level: int = logging.INFO,
+        format: str = "%(asctime)s:%(name)s:%(levelname)s: %(message)s",
     ) -> None:
         """
         Initialize the logger instance.
@@ -46,10 +47,10 @@ class Logger:
     def _setup_handlers(format: str) -> None:
         """
         Configure logging handlers.
-        
+
         Sets up both console and file handlers with consistent formatting.
         Creates log directory if it doesn't exist.
-        
+
         Args:
             format: Format string for log messages
         """
@@ -72,7 +73,7 @@ class Logger:
     def get_logger(self) -> logging.Logger:
         """
         Get the configured logger instance.
-        
+
         Returns:
             Configured logging.Logger instance
         """

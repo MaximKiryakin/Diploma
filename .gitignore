@@ -1,0 +1,6 @@
+.idea/
+masters/.ipynb_checkpoints/
+masters/data/macro/.ipynb_checkpoints/
+masters/logs/
+masters/utils/.ipynb_checkpoints/
+masters/utils/__pycache__/
