@@ -1,4 +1,5 @@
 from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate
+from utils.logger import Logger
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 import pickle
 from statsmodels.tsa.api import VAR
@@ -21,6 +22,9 @@ import sys
 import matplotlib
 from datetime import datetime, timedelta
 
+# Логгер будет создаваться в каждом экземпляре Portfolio отдельно
+
+
 class Portfolio:
     def __init__(
         self, dt_calc: str, dt_start: str, stocks_step: int, tickers_list: list[str]
@@ -35,6 +39,10 @@ class Portfolio:
         self.macro_connection_summary = None
         self.end_time = None
         self.start_time = None
+        # Создаем логгер для этого экземпляра Portfolio
+        self._logger_wrapper = Logger(f'{__name__}.Portfolio')
+        self.logger = self._logger_wrapper.get_logger()
+        self.logger.info('Portfolio instance created with dt_calc=%s, dt_start=%s', dt_calc, dt_start)
 
     def log_system_info(self):
         """
@@ -46,11 +54,11 @@ class Portfolio:
 
         self.start_time = datetime.now()
 
-        print("=" * 60)
-        print(
+        self.logger.info("=" * 60)
+        self.logger.info(
             f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}"
         )
-        print("=" * 60)
+        self.logger.info("=" * 60)
 
         return self
 
@@ -64,12 +72,12 @@ class Portfolio:
 
         self.end_time = datetime.now()
 
-        print("=" * 60)
-        print(
+        self.logger.info("=" * 60)
+        self.logger.info(
             "ANALYSIS COMPLETED | Duration: %.1f sec",
             (self.end_time - self.start_time).total_seconds(),
         )
-        print("=" * 60)
+        self.logger.info("=" * 60)
 
         return self
 
@@ -95,15 +103,13 @@ class Portfolio:
 
         if use_backup_data:
             if not os.path.isfile(backup_path):
-                print('ERROR:', f"Backup file was not found: {backup_path}")
+                log.error(f"Backup file was not found: {backup_path}")
                 raise Exception  # TODO specify exception list for this project
 
             with open(backup_path, "rb") as f:
                 self.stocks = pickle.load(f)
 
-            print(
-                "Stocks data loaded from backup | Records: %d", self.stocks.shape[0]
-            )
+            self.logger.info("Stocks data loaded from backup | Records: %d", self.stocks.shape[0])
         else:
             self.stocks = load_stock_data(
                 tickers_list=(
@@ -114,13 +120,13 @@ class Portfolio:
                 step=self.stocks_step,
             )
 
-            print(f"Stocks data was loaded from finam")
+            self.logger.info(f"Stocks data was loaded from finam")
 
         if create_backup:
             with open(backup_path, "wb") as f:
                 pickle.dump(self.stocks, f)
 
-            print(f"Backup file was saved: {backup_path}")
+            self.logger.info(f"Backup file was saved: {backup_path}")
 
         self.stocks = (
             self.stocks.rename(
@@ -166,9 +172,7 @@ class Portfolio:
             .rename(columns={"company": "ticker"})
         )
 
-        print(
-            "Multipliers data loaded | Features: %s", list(self.multipliers.columns)
-        )
+        self.logger.info("Multipliers data loaded | Features: %s", list(self.multipliers.columns))
 
         return self
 
@@ -184,9 +188,7 @@ class Portfolio:
             self.multipliers, on=["ticker", "year", "quarter"], how="left"
         )
 
-        print(
-            "Portfolio created | Companies: %d", len(self.portfolio.ticker.unique())
-        )
+        self.logger.info("Portfolio created | Companies: %d", len(self.portfolio.ticker.unique()))
 
         return self
 
@@ -254,7 +256,7 @@ class Portfolio:
             columns=["Чистый долг, млрд руб"]
         )
 
-        print("Column types adjusted: %s", column_to_adjust)
+        self.logger.info("Column types adjusted: %s", column_to_adjust)
 
         return self
 
@@ -294,9 +296,7 @@ class Portfolio:
         for col in ["inflation", "interest_rate", "unemployment_rate"]:
             self.portfolio[col] /= 100
 
-        print(
-            "Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB"
-        )
+        self.logger.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
 
         return self
 
@@ -319,13 +319,13 @@ class Portfolio:
                 lambda x: x.ffill().bfill()
             )
 
-        print(
-            f"Missing values share in: Debt ({np.round(missing['debt'],3)*100} %),"
-            + f"Cap ({np.round(missing['capitalization'], 3)*100} %), "
-            + f"USD/RUB ({np.round(missing['rubusd_exchange_rate']*100, 1)} %)"
+        # Log missing values summary using the logger's pretty print method
+        self._logger_wrapper.log_missing_values_summary(
+            missing_dict=missing,
+            title="Missing Values Summary (Before Filling)"
         )
 
-        print(f"Missing values filled in: {columns_to_fill}")
+        self.logger.info(f"Missing values filled in: {columns_to_fill}")
 
         return self
 
@@ -381,7 +381,7 @@ class Portfolio:
         self.portfolio["V"] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
         self.portfolio["sigma_V"] = results[:, 1]
 
-        print(f"Capital cost and capital volatility calculated.")
+        self.logger.info(f"Capital cost and capital volatility calculated.")
 
         return self
 
@@ -406,7 +406,7 @@ class Portfolio:
         ) / (sigma_V * np.sqrt(T))
         self.portfolio["PD"] = norm.cdf(-d2)
 
-        print(f"Merton's probabilities of default calculated.")
+        self.logger.info(f"Merton's probabilities of default calculated.")
 
         return self
 
@@ -447,7 +447,7 @@ class Portfolio:
             data = self.portfolio.query(f"ticker == '{ticker}'")
 
             if data.empty:
-                print(f"No data for ticker {ticker}")
+                log.warning(f"No data for ticker {ticker}")
                 continue
 
             fig, ax = plt.subplots(figsize=figsize)
@@ -478,7 +478,7 @@ class Portfolio:
             plt.close()
 
         if tickers:
-            print(
+            self.logger.info(
                 "PD graphs saved | "
                 f"Companies: {len(tickers)} | "
                 f"Path: logs/graphs/"
@@ -519,15 +519,15 @@ class Portfolio:
 
         if any(p > 0.05 for p in cols_before_diff.values()):
 
-            print("p-values before differencing:\n%s", pd.Series(cols_before_diff))
+            self.logger.info("p-values before differencing:\n%s", pd.Series(cols_before_diff))
 
             data = data.diff().dropna()
-            print("Applied differencing to achieve stationarity")
+            self.logger.info("Applied differencing to achieve stationarity")
 
             for col in data.columns:
                 cols_before_diff[col] = adfuller(data[col].dropna())[1]
 
-            print("p-values after differencing:\n%s", pd.Series(cols_before_diff))
+            self.logger.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
 
         if not isinstance(data.index, pd.DatetimeIndex):
             data.index = pd.RangeIndex(start=0, stop=len(data))
@@ -536,7 +536,7 @@ class Portfolio:
         lag_order = model.select_order(maxlags=6)
         selected_lags = lag_order.aic
 
-        print(
+        self.logger.info(
             f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
         )
 
@@ -578,7 +578,7 @@ class Portfolio:
                 plt.clf()
         plt.close()
 
-        print(f"Impulse response functions saved | Path: logs/graphs/")
+        self.logger.info(f"Impulse response functions saved | Path: logs/graphs/")
 
         return self
 
@@ -647,7 +647,7 @@ class Portfolio:
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor="white")
-            print(f"Correlation matrix saved | Path: {save_path}")
+            self.logger.info(f"Correlation matrix saved | Path: {save_path}")
 
         if verbose:
             plt.show()
@@ -720,7 +720,7 @@ class Portfolio:
             plt.close()
 
         if tickers:
-            print(
+            self.logger.info(
                 "Stock prices graphs saved | "
                 f"Companies: {len(tickers)} | "
                 f"Path: logs/graphs/"
@@ -822,7 +822,7 @@ class Portfolio:
             plt.close()
 
         if save_path:
-            print(
+            self.logger.info(
                 "Capitalization-debt graphs saved | "
                 f"Companies: {len(self.portfolio.ticker.unique())} | "
                 f"Path: {save_path}"
@@ -955,7 +955,7 @@ class Portfolio:
                     )
 
                 except Exception as e:
-                    print('ERROR:', f"Ошибка для {ticker}-{target}: {str(e)}")
+                    log.error(f"Ошибка для {ticker}-{target}: {str(e)}")
                     continue
 
                 results.append(record)
@@ -964,7 +964,90 @@ class Portfolio:
         result_df = result_df.dropna(subset=["best_alpha"])
 
         self.macro_connection_summary = result_df
-        print("Macro connection summary calculated.")
+        self.logger.info("Macro connection summary calculated.")
+
+        return self
+
+    def plot_macro_significance(
+        self, 
+        save_path: str = "logs/graphs/macro_significance_summary.png", 
+        verbose: bool = False, 
+        figsize: tuple = (10, 6)
+    ) -> "Portfolio":
+        """
+        Plots the significance of macroeconomic factors on Merton model parameters.
+
+        Args:
+            save_path (str): Path to save the plot. Default is "logs/graphs/macro_significance_summary.png".
+            verbose (bool): If True, displays the plot. If False, saves the plot to a file. Default is False.
+            figsize (tuple): Size of the plot. Default is (10, 6).
+
+        Returns:
+            Portfolio: Updated portfolio with plotted macro significance.
+        """
+
+        if self.macro_connection_summary is None:
+            raise ValueError("Macro connection summary not calculated. Run calc_macro_connections() first.")
+
+        import re
+        
+        factors = ['inflation', 'unemployment', 'usd_rub']
+        factor_labels = ['Инфляция', 'Безработица', 'USD/RUB']
+        significance_data = {'capitalization': [], 'debt': []}
+        
+        for target in ['capitalization', 'debt']:
+            target_data = self.macro_connection_summary[self.macro_connection_summary['target'] == target]
+            for factor in factors:
+                ci_col = f'coef_{factor}_ci'
+                significant = sum(
+                    1 for _, row in target_data.iterrows()
+                    if pd.notna(row[ci_col]) and (
+                        lambda nums: len(nums) == 2 and (
+                            (float(nums[0]) > 0 and float(nums[1]) > 0) or 
+                            (float(nums[0]) < 0 and float(nums[1]) < 0)
+                        )
+                    )(re.findall(r'-?\d+\.\d+', str(row[ci_col])))
+                )
+                total = target_data[ci_col].notna().sum()
+                significance_data[target].append(significant / total * 100 if total > 0 else 0)
+        
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        x = np.arange(len(factor_labels))
+        width = 0.35
+        
+        cap_bars = ax.bar(x - width/2, significance_data['capitalization'], width, 
+                         label='Капитализация', color='steelblue', alpha=0.8)
+        debt_bars = ax.bar(x + width/2, significance_data['debt'], width, 
+                          label='Долг', color='darkred', alpha=0.8)
+        
+        ax.set_xlabel('Макроэкономические факторы', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Доля значимых связей, %', fontsize=12, fontweight='bold')
+        ax.set_title('Влияние макрофакторов на параметры модели Мертона', 
+                     fontsize=14, fontweight='bold', pad=20)
+        ax.set_xticks(x)
+        ax.set_xticklabels(factor_labels)
+        ax.legend(fontsize=11)
+        ax.set_ylim(0, 100)
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        
+        for bars in [cap_bars, debt_bars]:
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                       f'{height:.0f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+            self.logger.info(f"Macro significance plot saved | Path: {save_path}")
+
+        if verbose:
+            plt.show()
+        else:
+            plt.clf()
+        plt.close()
 
         return self
 
@@ -973,430 +1056,510 @@ class Portfolio:
     # ========================================================================
 
     def create_credit_risk_limits(
-        self, 
+        self,
         max_pd_threshold: float = 0.05,
         max_sector_concentration: float = 0.30,
-        max_single_exposure: float = 0.10
+        max_single_exposure: float = 0.10,
     ) -> "Portfolio":
         """
         Создает лимиты кредитного риска для управления портфелем.
-        
+
         Args:
             max_pd_threshold (float): Максимальная допустимая PD для выдачи кредита (5%)
             max_sector_concentration (float): Максимальная концентрация в одном секторе (30%)
             max_single_exposure (float): Максимальная доля одного заемщика (10%)
-            
+
         Returns:
             Portfolio: Updated portfolio with credit risk limits.
         """
-        
+
         self.credit_limits = {
-            'max_pd_threshold': max_pd_threshold,
-            'max_sector_concentration': max_sector_concentration,
-            'max_single_exposure': max_single_exposure,
-            'total_portfolio_limit': 1.0  # 100% лимит портфеля
+            "max_pd_threshold": max_pd_threshold,
+            "max_sector_concentration": max_sector_concentration,
+            "max_single_exposure": max_single_exposure,
+            "total_portfolio_limit": 1.0,  # 100% лимит портфеля
         }
-        
-        print("Лимиты кредитного риска установлены:")
-        print(f"   • Максимальная PD: {max_pd_threshold:.1%}")
-        print(f"   • Секторная концентрация: {max_sector_concentration:.1%}")
-        print(f"   • Доля одного заемщика: {max_single_exposure:.1%}")
-        
+
+        self.logger.info("Лимиты кредитного риска установлены:")
+        self.logger.info(f"   • Максимальная PD: {max_pd_threshold:.1%}")
+        self.logger.info(f"   • Секторная концентрация: {max_sector_concentration:.1%}")
+        self.logger.info(f"   • Доля одного заемщика: {max_single_exposure:.1%}")
+
         return self
 
     def analyze_portfolio_status(self) -> "Portfolio":
         """
         Анализирует текущее состояние портфеля и выводит статистики PD.
-        
+
         Returns:
             Portfolio: Updated portfolio with analysis.
         """
         # Анализ текущих PD в портфеле
-        current_pd_stats = self.portfolio.groupby('ticker')['PD'].last()
-        
-        print("Текущее состояние потенциальных заемщиков:")
-        print(f"   • Средняя PD: {current_pd_stats.mean():.3f} ({current_pd_stats.mean()*100:.2f}%)")
-        print(f"   • Компании с PD <= 5%: {(current_pd_stats <= 0.05).sum()}/{len(current_pd_stats)}")
-        print(f"   • Компании с высоким риском (PD > 5%): {(current_pd_stats > 0.05).sum()}")
+        current_pd_stats = self.portfolio.groupby("ticker")["PD"].last()
+
+        self.logger.info("Текущее состояние потенциальных заемщиков:")
+        self.logger.info(
+            f"   • Средняя PD: {current_pd_stats.mean():.3f} ({current_pd_stats.mean()*100:.2f}%)"
+        )
+        self.logger.info(
+            f"   • Компании с PD <= 5%: {(current_pd_stats <= 0.05).sum()}/{len(current_pd_stats)}"
+        )
+        self.logger.info(
+            f"   • Компании с высоким риском (PD > 5%): {(current_pd_stats > 0.05).sum()}"
+        )
 
         # Показываем топ-5 самых надежных и рискованных
-        print("ТОП-5 НАИБОЛЕЕ НАДЕЖНЫХ ЗАЕМЩИКОВ:")
+        self.logger.info("ТОП-5 НАИБОЛЕЕ НАДЕЖНЫХ ЗАЕМЩИКОВ:")
         safest = current_pd_stats.sort_values().head(5)
         for ticker, pd_val in safest.items():
-            print(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
+            self.logger.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
 
-        print("ТОП-5 НАИБОЛЕЕ РИСКОВАННЫХ ЗАЕМЩИКОВ:")
+        self.logger.info("ТОП-5 НАИБОЛЕЕ РИСКОВАННЫХ ЗАЕМЩИКОВ:")
         riskiest = current_pd_stats.sort_values(ascending=False).head(5)
         for ticker, pd_val in riskiest.items():
-            print(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
-            
+            self.logger.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
+
         return self
 
     def assess_credit_application(
-        self, 
+        self,
         borrower_ticker: str,
         loan_amount: float,
-        current_portfolio_size: float = 1000000000  # 1 млрд рублей
+        current_portfolio_size: float = 1000000000,  # 1 млрд рублей
     ) -> Dict[str, Any]:
         """
         Оценивает заявку на кредит на основе PD и лимитов риска.
-        
+
         Args:
             borrower_ticker (str): Тикер заемщика (например, 'GAZP')
             loan_amount (float): Запрашиваемая сумма кредита в рублях
             current_portfolio_size (float): Текущий размер кредитного портфеля
-            
+
         Returns:
             dict: Решение по кредитной заявке с обоснованием
         """
-        
-        if not hasattr(self, 'credit_limits'):
+
+        if not hasattr(self, "credit_limits"):
             self.create_credit_risk_limits()
-        
+
         # Получаем текущую PD заемщика
-        latest_data = self.portfolio[self.portfolio['ticker'] == borrower_ticker].tail(1)
-        
+        latest_data = self.portfolio[self.portfolio["ticker"] == borrower_ticker].tail(
+            1
+        )
+
         if latest_data.empty:
             return {
-                'decision': 'ОТКЛОНИТЬ',
-                'reason': f'Заемщик {borrower_ticker} отсутствует в базе данных',
-                'pd': None,
-                'risk_rating': 'UNKNOWN',
-                'recommended_rate': None
+                "decision": "ОТКЛОНИТЬ",
+                "reason": f"Заемщик {borrower_ticker} отсутствует в базе данных",
+                "pd": None,
+                "risk_rating": "UNKNOWN",
+                "recommended_rate": None,
             }
-        
-        borrower_pd = latest_data['PD'].iloc[0]
-        
+
+        borrower_pd = latest_data["PD"].iloc[0]
+
         # Определяем сектор заемщика
         sector_mapping = {
-            'GAZP': 'Нефтегаз', 'LKOH': 'Нефтегаз', 'ROSN': 'Нефтегаз',
-            'SBER': 'Финансы', 'VTBR': 'Финансы', 'MOEX': 'Финансы',
-            'GMKN': 'Металлургия', 'NLMK': 'Металлургия', 'RUAL': 'Металлургия',
-            'MTSS': 'Телеком', 'RTKM': 'Телеком', 'TTLK': 'Телеком',
-            'MGNT': 'Ритейл', 'LNTA': 'Ритейл', 'FESH': 'Ритейл'
+            "GAZP": "Нефтегаз",
+            "LKOH": "Нефтегаз",
+            "ROSN": "Нефтегаз",
+            "SBER": "Финансы",
+            "VTBR": "Финансы",
+            "MOEX": "Финансы",
+            "GMKN": "Металлургия",
+            "NLMK": "Металлургия",
+            "RUAL": "Металлургия",
+            "MTSS": "Телеком",
+            "RTKM": "Телеком",
+            "TTLK": "Телеком",
+            "MGNT": "Ритейл",
+            "LNTA": "Ритейл",
+            "FESH": "Ритейл",
         }
-        borrower_sector = sector_mapping.get(borrower_ticker, 'Прочие')
-        
+        borrower_sector = sector_mapping.get(borrower_ticker, "Прочие")
+
         # Оценка рисков
         exposure_ratio = loan_amount / current_portfolio_size
-        
+
         # Проверяем лимиты
         checks = {
-            'pd_check': borrower_pd <= self.credit_limits['max_pd_threshold'],
-            'single_exposure_check': exposure_ratio <= self.credit_limits['max_single_exposure'],
-            'pd_value': borrower_pd,
-            'exposure_ratio': exposure_ratio,
-            'sector': borrower_sector
+            "pd_check": borrower_pd <= self.credit_limits["max_pd_threshold"],
+            "single_exposure_check": exposure_ratio
+            <= self.credit_limits["max_single_exposure"],
+            "pd_value": borrower_pd,
+            "exposure_ratio": exposure_ratio,
+            "sector": borrower_sector,
         }
-        
+
         # Определяем рейтинг риска
         if borrower_pd <= 0.01:
-            risk_rating = 'AAA (Высший)'
+            risk_rating = "AAA (Высший)"
             base_rate = 0.08  # 8%
         elif borrower_pd <= 0.02:
-            risk_rating = 'AA (Высокий)'
+            risk_rating = "AA (Высокий)"
             base_rate = 0.10  # 10%
         elif borrower_pd <= 0.03:
-            risk_rating = 'A (Хороший)'
+            risk_rating = "A (Хороший)"
             base_rate = 0.12  # 12%
         elif borrower_pd <= 0.05:
-            risk_rating = 'BBB (Удовлетворительный)'
+            risk_rating = "BBB (Удовлетворительный)"
             base_rate = 0.15  # 15%
         else:
-            risk_rating = 'BB и ниже (Высокий риск)'
+            risk_rating = "BB и ниже (Высокий риск)"
             base_rate = 0.20  # 20%
-        
+
         # Корректировка ставки на концентрацию
-        concentration_premium = max(0, (exposure_ratio - 0.05) * 2)  # +2% за каждые 5% сверх лимита
+        concentration_premium = max(
+            0, (exposure_ratio - 0.05) * 2
+        )  # +2% за каждые 5% сверх лимита
         recommended_rate = base_rate + concentration_premium
-        
+
         # Принятие решения
-        if checks['pd_check'] and checks['single_exposure_check']:
-            decision = 'ОДОБРИТЬ'
+        if checks["pd_check"] and checks["single_exposure_check"]:
+            decision = "ОДОБРИТЬ"
             reason = f'Все лимиты соблюдены. PD: {borrower_pd:.3f} <= {self.credit_limits["max_pd_threshold"]:.3f}'
-        elif not checks['pd_check']:
-            decision = 'ОТКЛОНИТЬ'
+        elif not checks["pd_check"]:
+            decision = "ОТКЛОНИТЬ"
             reason = f'Превышен лимит PD: {borrower_pd:.3f} > {self.credit_limits["max_pd_threshold"]:.3f}'
-        elif not checks['single_exposure_check']:
-            decision = 'ОТКЛОНИТЬ' if exposure_ratio > 0.15 else 'УСЛОВНО ОДОБРИТЬ'
-            reason = f'Высокая концентрация: {exposure_ratio:.1%} от портфеля'
+        elif not checks["single_exposure_check"]:
+            decision = "ОТКЛОНИТЬ" if exposure_ratio > 0.15 else "УСЛОВНО ОДОБРИТЬ"
+            reason = f"Высокая концентрация: {exposure_ratio:.1%} от портфеля"
         else:
-            decision = 'ОТКЛОНИТЬ'
-            reason = 'Множественные нарушения лимитов'
-        
+            decision = "ОТКЛОНИТЬ"
+            reason = "Множественные нарушения лимитов"
+
         return {
-            'borrower': borrower_ticker,
-            'decision': decision,
-            'reason': reason,
-            'pd': borrower_pd,
-            'risk_rating': risk_rating,
-            'recommended_rate': recommended_rate,
-            'loan_amount': loan_amount,
-            'exposure_ratio': exposure_ratio,
-            'sector': borrower_sector,
-            'checks': checks
+            "borrower": borrower_ticker,
+            "decision": decision,
+            "reason": reason,
+            "pd": borrower_pd,
+            "risk_rating": risk_rating,
+            "recommended_rate": recommended_rate,
+            "loan_amount": loan_amount,
+            "exposure_ratio": exposure_ratio,
+            "sector": borrower_sector,
+            "checks": checks,
         }
 
     def optimize_credit_portfolio(
-        self, 
+        self,
         loan_applications: List[Dict],
         portfolio_budget: float = 1000000000,
-        target_return: float = 0.12
+        target_return: float = 0.12,
     ) -> Dict[str, Any]:
         """
         Оптимизирует состав кредитного портфеля из заявок.
-        
+
         Args:
             loan_applications (list): Список заявок [{'ticker': 'GAZP', 'amount': 100000000, 'rate': 0.10}]
             portfolio_budget (float): Общий бюджет для кредитования (1 млрд рублей)
             target_return (float): Целевая доходность портфеля (12%)
-            
+
         Returns:
             dict: Оптимальный состав кредитного портфеля
         """
-        
-        if not hasattr(self, 'credit_limits'):
+
+        if not hasattr(self, "credit_limits"):
             self.create_credit_risk_limits()
-        
+
         # Оцениваем каждую заявку
         evaluated_applications = []
         for app in loan_applications:
             assessment = self.assess_credit_application(
-                app['ticker'], 
-                app['amount'], 
-                portfolio_budget
+                app["ticker"], app["amount"], portfolio_budget
             )
-            
-            if assessment['decision'] in ['ОДОБРИТЬ', 'УСЛОВНО ОДОБРИТЬ']:
+
+            if assessment["decision"] in ["ОДОБРИТЬ", "УСЛОВНО ОДОБРИТЬ"]:
                 app_with_assessment = app.copy()
                 app_with_assessment.update(assessment)
-                app_with_assessment['risk_adjusted_return'] = app.get('rate', assessment['recommended_rate']) - assessment['pd']
+                app_with_assessment["risk_adjusted_return"] = (
+                    app.get("rate", assessment["recommended_rate"]) - assessment["pd"]
+                )
                 evaluated_applications.append(app_with_assessment)
-        
+
         # Сортируем по риск-скорректированной доходности
-        evaluated_applications.sort(key=lambda x: x['risk_adjusted_return'], reverse=True)
-        
+        evaluated_applications.sort(
+            key=lambda x: x["risk_adjusted_return"], reverse=True
+        )
+
         # Формируем оптимальный портфель
         selected_loans = []
         total_allocated = 0
         sector_allocation = {}
-        
+
         for app in evaluated_applications:
-            if total_allocated + app['amount'] <= portfolio_budget:
+            if total_allocated + app["amount"] <= portfolio_budget:
                 # Проверяем секторные лимиты
-                sector = app['sector']
+                sector = app["sector"]
                 current_sector_allocation = sector_allocation.get(sector, 0)
-                new_sector_allocation = (current_sector_allocation + app['amount']) / portfolio_budget
-                
-                if new_sector_allocation <= self.credit_limits['max_sector_concentration']:
+                new_sector_allocation = (
+                    current_sector_allocation + app["amount"]
+                ) / portfolio_budget
+
+                if (
+                    new_sector_allocation
+                    <= self.credit_limits["max_sector_concentration"]
+                ):
                     selected_loans.append(app)
-                    total_allocated += app['amount']
-                    sector_allocation[sector] = current_sector_allocation + app['amount']
-        
+                    total_allocated += app["amount"]
+                    sector_allocation[sector] = (
+                        current_sector_allocation + app["amount"]
+                    )
+
         # Расчет портфельных метрик
-        portfolio_return = sum(loan['amount'] * loan.get('rate', loan['recommended_rate']) 
-                              for loan in selected_loans) / total_allocated if total_allocated > 0 else 0
-        
-        portfolio_pd = sum(loan['amount'] * loan['pd'] for loan in selected_loans) / total_allocated if total_allocated > 0 else 0
-        
+        portfolio_return = (
+            sum(
+                loan["amount"] * loan.get("rate", loan["recommended_rate"])
+                for loan in selected_loans
+            )
+            / total_allocated
+            if total_allocated > 0
+            else 0
+        )
+
+        portfolio_pd = (
+            sum(loan["amount"] * loan["pd"] for loan in selected_loans)
+            / total_allocated
+            if total_allocated > 0
+            else 0
+        )
+
         utilization_rate = total_allocated / portfolio_budget
-        
+
         return {
-            'selected_loans': selected_loans,
-            'total_allocated': total_allocated,
-            'portfolio_budget': portfolio_budget,
-            'utilization_rate': utilization_rate,
-            'portfolio_return': portfolio_return,
-            'portfolio_pd': portfolio_pd,
-            'portfolio_spread': portfolio_return - portfolio_pd,
-            'sector_allocation': {k: v/portfolio_budget for k, v in sector_allocation.items()},
-            'number_of_loans': len(selected_loans),
-            'rejected_applications': len(loan_applications) - len(selected_loans)
+            "selected_loans": selected_loans,
+            "total_allocated": total_allocated,
+            "portfolio_budget": portfolio_budget,
+            "utilization_rate": utilization_rate,
+            "portfolio_return": portfolio_return,
+            "portfolio_pd": portfolio_pd,
+            "portfolio_spread": portfolio_return - portfolio_pd,
+            "sector_allocation": {
+                k: v / portfolio_budget for k, v in sector_allocation.items()
+            },
+            "number_of_loans": len(selected_loans),
+            "rejected_applications": len(loan_applications) - len(selected_loans),
         }
 
     def monitor_credit_portfolio_health(self) -> Dict[str, Any]:
         """
         Мониторинг состояния кредитного портфеля и раннее предупреждение рисков.
-        
+
         Returns:
             dict: Отчет о состоянии портфеля с предупреждениями
         """
-        
+
         if self.portfolio is None or self.portfolio.empty:
-            return {'error': 'Portfolio data not available'}
-        
+            return {"error": "Portfolio data not available"}
+
         # Анализ текущих PD по всему портфелю
-        latest_data = self.portfolio.groupby('ticker').last()
-        
+        latest_data = self.portfolio.groupby("ticker").last()
+
         # Статистики PD
         pd_stats = {
-            'mean_pd': latest_data['PD'].mean(),
-            'median_pd': latest_data['PD'].median(),
-            'max_pd': latest_data['PD'].max(),
-            'min_pd': latest_data['PD'].min(),
-            'std_pd': latest_data['PD'].std(),
-            'companies_count': len(latest_data)
+            "mean_pd": latest_data["PD"].mean(),
+            "median_pd": latest_data["PD"].median(),
+            "max_pd": latest_data["PD"].max(),
+            "min_pd": latest_data["PD"].min(),
+            "std_pd": latest_data["PD"].std(),
+            "companies_count": len(latest_data),
         }
-        
+
         # Предупреждения о рисках
         risk_warnings = []
-        
+
         # Проверка высоких PD
-        high_risk_companies = latest_data[latest_data['PD'] > 0.05]
+        high_risk_companies = latest_data[latest_data["PD"] > 0.05]
         if not high_risk_companies.empty:
-            risk_warnings.append({
-                'type': 'HIGH_PD_WARNING',
-                'message': f'Высокий риск дефолта у {len(high_risk_companies)} компаний',
-                'companies': high_risk_companies.index.tolist(),
-                'max_pd': high_risk_companies['PD'].max()
-            })
-        
+            risk_warnings.append(
+                {
+                    "type": "HIGH_PD_WARNING",
+                    "message": f"Высокий риск дефолта у {len(high_risk_companies)} компаний",
+                    "companies": high_risk_companies.index.tolist(),
+                    "max_pd": high_risk_companies["PD"].max(),
+                }
+            )
+
         # Проверка роста PD (требует исторических данных)
         if len(self.portfolio) > len(self.tickers_list):  # есть история
             pd_changes = {}
             for ticker in self.tickers_list:
-                ticker_data = self.portfolio[self.portfolio['ticker'] == ticker]['PD']
+                ticker_data = self.portfolio[self.portfolio["ticker"] == ticker]["PD"]
                 if len(ticker_data) >= 2:
                     recent_change = ticker_data.iloc[-1] - ticker_data.iloc[-2]
                     if recent_change > 0.01:  # рост PD более чем на 1%
                         pd_changes[ticker] = recent_change
-            
+
             if pd_changes:
-                risk_warnings.append({
-                    'type': 'PD_GROWTH_WARNING',
-                    'message': f'Значительный рост PD у {len(pd_changes)} компаний',
-                    'companies': pd_changes
-                })
-        
+                risk_warnings.append(
+                    {
+                        "type": "PD_GROWTH_WARNING",
+                        "message": f"Значительный рост PD у {len(pd_changes)} компаний",
+                        "companies": pd_changes,
+                    }
+                )
+
         # Секторный анализ рисков
         sector_mapping = {
-            'GAZP': 'Нефтегаз', 'LKOH': 'Нефтегаз', 'ROSN': 'Нефтегаз',
-            'SBER': 'Финансы', 'VTBR': 'Финансы', 'MOEX': 'Финансы',
-            'GMKN': 'Металлургия', 'NLMK': 'Металлургия', 'RUAL': 'Металлургия',
-            'MTSS': 'Телеком', 'RTKM': 'Телеком', 'TTLK': 'Телеком',
-            'MGNT': 'Ритейл', 'LNTA': 'Ритейл', 'FESH': 'Ритейл'
+            "GAZP": "Нефтегаз",
+            "LKOH": "Нефтегаз",
+            "ROSN": "Нефтегаз",
+            "SBER": "Финансы",
+            "VTBR": "Финансы",
+            "MOEX": "Финансы",
+            "GMKN": "Металлургия",
+            "NLMK": "Металлургия",
+            "RUAL": "Металлургия",
+            "MTSS": "Телеком",
+            "RTKM": "Телеком",
+            "TTLK": "Телеком",
+            "MGNT": "Ритейл",
+            "LNTA": "Ритейл",
+            "FESH": "Ритейл",
         }
-        
-        latest_data['sector'] = latest_data.index.map(sector_mapping)
-        sector_pd = latest_data.groupby('sector')['PD'].agg(['mean', 'max', 'count'])
-        
+
+        latest_data["sector"] = latest_data.index.map(sector_mapping)
+        sector_pd = latest_data.groupby("sector")["PD"].agg(["mean", "max", "count"])
+
         # Рекомендации по управлению
         recommendations = []
-        
-        if pd_stats['mean_pd'] > 0.03:
-            recommendations.append('Средняя PD портфеля превышает 3% - рекомендуется ужесточить андеррайтинг')
-        
-        if pd_stats['max_pd'] > 0.08:
-            recommendations.append('Есть компании с PD > 8% - требуется пересмотр лимитов или досрочное погашение')
-        
-        worst_sector = sector_pd['mean'].idxmax()
-        if sector_pd.loc[worst_sector, 'mean'] > 0.05:
-            recommendations.append(f'Сектор "{worst_sector}" показывает высокие риски - ограничить новые выдачи')
-        
+
+        if pd_stats["mean_pd"] > 0.03:
+            recommendations.append(
+                "Средняя PD портфеля превышает 3% - рекомендуется ужесточить андеррайтинг"
+            )
+
+        if pd_stats["max_pd"] > 0.08:
+            recommendations.append(
+                "Есть компании с PD > 8% - требуется пересмотр лимитов или досрочное погашение"
+            )
+
+        worst_sector = sector_pd["mean"].idxmax()
+        if sector_pd.loc[worst_sector, "mean"] > 0.05:
+            recommendations.append(
+                f'Сектор "{worst_sector}" показывает высокие риски - ограничить новые выдачи'
+            )
+
         return {
-            'portfolio_health_score': max(0, min(100, 100 - pd_stats['mean_pd'] * 2000)),  # 0-100 шкала
-            'pd_statistics': pd_stats,
-            'sector_analysis': sector_pd.to_dict(),
-            'risk_warnings': risk_warnings,
-            'recommendations': recommendations,
-            'monitoring_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "portfolio_health_score": max(
+                0, min(100, 100 - pd_stats["mean_pd"] * 2000)
+            ),  # 0-100 шкала
+            "pd_statistics": pd_stats,
+            "sector_analysis": sector_pd.to_dict(),
+            "risk_warnings": risk_warnings,
+            "recommendations": recommendations,
+            "monitoring_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     def generate_credit_report(
-        self, 
-        loan_decisions: List[Dict] = None,
-        save_path: str = None
+        self, loan_decisions: List[Dict] = None, save_path: str = None
     ) -> "Portfolio":
         """
         Генерирует отчет по управлению кредитным портфелем.
-        
+
         Args:
             loan_decisions (list): Список решений по кредитам для включения в отчет
             save_path (str): Путь для сохранения отчета
-            
+
         Returns:
             Portfolio: Updated portfolio with generated report
         """
-        
-        print("=" * 80)
-        print("ОТЧЕТ ПО УПРАВЛЕНИЮ КРЕДИТНЫМ ПОРТФЕЛЕМ")
-        print("=" * 80)
-        
+
+        self.logger.info("=" * 80)
+        self.logger.info("ОТЧЕТ ПО УПРАВЛЕНИЮ КРЕДИТНЫМ ПОРТФЕЛЕМ")
+        self.logger.info("=" * 80)
+
         # 1. Текущее состояние портфеля
         health_report = self.monitor_credit_portfolio_health()
-        
-        print(f"\n1. СОСТОЯНИЕ ПОРТФЕЛЯ (Оценка: {health_report['portfolio_health_score']:.1f}/100)")
-        print("-" * 50)
-        
-        pd_stats = health_report['pd_statistics']
-        print(f"Средняя PD портфеля: {pd_stats['mean_pd']:.3f} ({pd_stats['mean_pd']*100:.2f}%)")
-        print(f"Медианная PD: {pd_stats['median_pd']:.3f}")
-        print(f"Диапазон PD: {pd_stats['min_pd']:.3f} - {pd_stats['max_pd']:.3f}")
-        print(f"Количество заемщиков: {pd_stats['companies_count']}")
-        
+
+        self.logger.info(
+            f"\n1. СОСТОЯНИЕ ПОРТФЕЛЯ (Оценка: {health_report['portfolio_health_score']:.1f}/100)"
+        )
+        self.logger.info("-" * 50)
+
+        pd_stats = health_report["pd_statistics"]
+        self.logger.info(
+            f"Средняя PD портфеля: {pd_stats['mean_pd']:.3f} ({pd_stats['mean_pd']*100:.2f}%)"
+        )
+        self.logger.info(f"Медианная PD: {pd_stats['median_pd']:.3f}")
+        self.logger.info(f"Диапазон PD: {pd_stats['min_pd']:.3f} - {pd_stats['max_pd']:.3f}")
+        self.logger.info(f"Количество заемщиков: {pd_stats['companies_count']}")
+
         # 2. Предупреждения о рисках
-        if health_report['risk_warnings']:
-            print(f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ ({len(health_report['risk_warnings'])} активных)")
-            print("-" * 50)
-            for warning in health_report['risk_warnings']:
-                print(f"⚠️  {warning['message']}")
-                if 'companies' in warning and isinstance(warning['companies'], list):
-                    print(f"    Компании: {', '.join(warning['companies'])}")
+        if health_report["risk_warnings"]:
+            self.logger.info(
+                f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ ({len(health_report['risk_warnings'])} активных)"
+            )
+            self.logger.info("-" * 50)
+            for warning in health_report["risk_warnings"]:
+                log.warning(f"⚠️  {warning['message']}")
+                if "companies" in warning and isinstance(warning["companies"], list):
+                    log.warning(f"    Компании: {', '.join(warning['companies'])}")
         else:
-            print(f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ")
-            print("-" * 50)
-            print("✅ Критических рисков не выявлено")
-        
+            self.logger.info(f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ")
+            self.logger.info("-" * 50)
+            self.logger.info("✅ Критических рисков не выявлено")
+
         # 3. Секторный анализ
-        print(f"\n3. АНАЛИЗ ПО СЕКТОРАМ")
-        print("-" * 50)
-        sector_analysis = health_report['sector_analysis']
-        
-        print(f"{'Сектор':<15} {'Средняя PD':<12} {'Макс PD':<10} {'Компании':<10}")
-        print("-" * 50)
-        for sector in sector_analysis['mean'].keys():
-            mean_pd = sector_analysis['mean'][sector]
-            max_pd = sector_analysis['max'][sector] 
-            count = sector_analysis['count'][sector]
-            print(f"{sector:<15} {mean_pd:.3f} ({mean_pd*100:>5.2f}%) {max_pd:.3f} ({max_pd*100:>5.2f}%) {count:>8}")
-        
+        self.logger.info(f"\n3. АНАЛИЗ ПО СЕКТОРАМ")
+        self.logger.info("-" * 50)
+        sector_analysis = health_report["sector_analysis"]
+
+        self.logger.info(f"{'Сектор':<15} {'Средняя PD':<12} {'Макс PD':<10} {'Компании':<10}")
+        self.logger.info("-" * 50)
+        for sector in sector_analysis["mean"].keys():
+            mean_pd = sector_analysis["mean"][sector]
+            max_pd = sector_analysis["max"][sector]
+            count = sector_analysis["count"][sector]
+            self.logger.info(
+                f"{sector:<15} {mean_pd:.3f} ({mean_pd*100:>5.2f}%) {max_pd:.3f} ({max_pd*100:>5.2f}%) {count:>8}"
+            )
+
         # 4. Решения по кредитам (если предоставлены)
         if loan_decisions:
-            print(f"\n4. РЕШЕНИЯ ПО КРЕДИТНЫМ ЗАЯВКАМ ({len(loan_decisions)} заявок)")
-            print("-" * 50)
-            
-            approved = [d for d in loan_decisions if d.get('decision') == 'ОДОБРИТЬ']
-            rejected = [d for d in loan_decisions if d.get('decision') == 'ОТКЛОНИТЬ']
-            conditional = [d for d in loan_decisions if d.get('decision') == 'УСЛОВНО ОДОБРИТЬ']
-            
-            print(f"✅ Одобрено: {len(approved)} заявок")
-            print(f"❌ Отклонено: {len(rejected)} заявок") 
-            print(f"⚠️  Условно одобрено: {len(conditional)} заявок")
-            
+            self.logger.info(f"\n4. РЕШЕНИЯ ПО КРЕДИТНЫМ ЗАЯВКАМ ({len(loan_decisions)} заявок)")
+            self.logger.info("-" * 50)
+
+            approved = [d for d in loan_decisions if d.get("decision") == "ОДОБРИТЬ"]
+            rejected = [d for d in loan_decisions if d.get("decision") == "ОТКЛОНИТЬ"]
+            conditional = [
+                d for d in loan_decisions if d.get("decision") == "УСЛОВНО ОДОБРИТЬ"
+            ]
+
+            self.logger.info(f"✅ Одобрено: {len(approved)} заявок")
+            self.logger.info(f"❌ Отклонено: {len(rejected)} заявок")
+            self.logger.info(f"⚠️  Условно одобрено: {len(conditional)} заявок")
+
             if approved:
-                total_approved_amount = sum(d.get('loan_amount', 0) for d in approved)
-                avg_rate = sum(d.get('recommended_rate', 0) for d in approved) / len(approved)
-                print(f"Общая сумма одобренных кредитов: {total_approved_amount:,.0f} руб.")
-                print(f"Средняя рекомендованная ставка: {avg_rate:.2%}")
-        
+                total_approved_amount = sum(d.get("loan_amount", 0) for d in approved)
+                avg_rate = sum(d.get("recommended_rate", 0) for d in approved) / len(
+                    approved
+                )
+                self.logger.info(
+                    f"Общая сумма одобренных кредитов: {total_approved_amount:,.0f} руб."
+                )
+                self.logger.info(f"Средняя рекомендованная ставка: {avg_rate:.2%}")
+
         # 5. Рекомендации
-        print(f"\n5. РЕКОМЕНДАЦИИ ПО УПРАВЛЕНИЮ")
-        print("-" * 50)
-        for i, rec in enumerate(health_report['recommendations'], 1):
-            print(f"{i}. {rec}")
-        
-        if not health_report['recommendations']:
-            print("✅ Портфель находится в хорошем состоянии. Текущая стратегия эффективна.")
-        
-        print(f"\n{'=' * 80}")
-        print(f"Отчет сгенерирован: {health_report['monitoring_date']}")
-        print(f"{'=' * 80}")
-        
+        self.logger.info(f"\n5. РЕКОМЕНДАЦИИ ПО УПРАВЛЕНИЮ")
+        self.logger.info("-" * 50)
+        for i, rec in enumerate(health_report["recommendations"], 1):
+            self.logger.info(f"{i}. {rec}")
+
+        if not health_report["recommendations"]:
+            self.logger.info(
+                "✅ Портфель находится в хорошем состоянии. Текущая стратегия эффективна."
+            )
+
+        self.logger.info(f"\n{'=' * 80}")
+        self.logger.info(f"Отчет сгенерирован: {health_report['monitoring_date']}")
+        self.logger.info(f"{'=' * 80}")
+
         # Сохранение отчета в файл (опционально)
         if save_path:
             # Здесь можно добавить сохранение в файл
-            print(f"Credit portfolio report would be saved to: {save_path}")
-        
-        print("Credit portfolio management report generated")
-        
+            self.logger.info(f"Credit portfolio report would be saved to: {save_path}")
+
+        self.logger.info("Credit portfolio management report generated")
+
         return self
