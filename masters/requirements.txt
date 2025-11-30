@@ -3,3 +3,9 @@ scipy==1.15.2
 openpyxl==3.1.5
 scikit-learn==1.4.0
 pycbrf==1.1.0
+pandas>=1.5.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+statsmodels>=0.13.0
+tqdm>=4.64.0
+lxml>=4.9.0

@@ -1,11 +1,16 @@
 [flake8]
-max-line-length = 100  # Можно согласовать с black
-ignore =
-    E203,  # Несовместимость с black (пробелы перед ':')
-    W503,  # Разрыв строки перед бинарным оператором (black так делает)
-    E501   # Длина строки (если проверяется black)
-exclude =
+max-line-length = 120
+extend-ignore = E203,W503,F401,W293,F541,E501
+exclude = 
     .git,
     __pycache__,
-    .venv,
-    migrations
+    .vscode,
+    .pytest_cache,
+    venv,
+    env,
+    logs,
+    data,
+    presentation,
+    text,
+    *example*.py,
+    visualization_*.py

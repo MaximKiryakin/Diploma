@@ -1,15 +1,17 @@
 import pandas as pd
 from datetime import datetime, timedelta
+import time
 from utils.LabelsDict import tickers
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
+from io import BytesIO
 from typing import List, Optional
 from utils.logger import Logger
 import os
 from tqdm import tqdm
 from pycbrf.toolbox import ExchangeRates
 
-log = Logger(__name__).get_logger()
+log = Logger(__name__)
 
 
 def download_finam_quotes(
@@ -58,9 +60,12 @@ def download_finam_quotes(
         )
 
     delta = period_deltas[period]
-    current_start = datetime.strptime(start, "%d.%m.%Y")
-    end_date = datetime.strptime(end, "%d.%m.%Y")
+    current_start = datetime.strptime(start, "%Y-%m-%d")
+    end_date = datetime.strptime(end, "%Y-%m-%d")
     result_df, first_bucket = None, True
+
+    total_intervals = (end_date - current_start) / delta
+    pbar = tqdm(total=total_intervals, desc=f"Downloading {ticker}", leave=False)
 
     while current_start <= end_date:
         start_rev = current_start.strftime("%Y%m%d")
@@ -99,6 +104,7 @@ def download_finam_quotes(
         url = f"http://export.finam.ru/{ticker}_{start_rev}_{end_rev}.csv?{params}"
 
         try:
+
             with urlopen(url) as response:
                 content = response.read().decode("utf-8")
                 lines = [line.split(",") for line in content.splitlines()]
@@ -108,6 +114,7 @@ def download_finam_quotes(
 
                 if lines[0][0] == "Запрашиваемая вами глубина недоступна":
                     current_start += delta
+                    pbar.update(1)
                     continue
 
                 if first_bucket:
@@ -119,12 +126,14 @@ def download_finam_quotes(
                 last_date = datetime.strptime(
                     f"{lines[-1][2]} {lines[-1][3]}", "%Y%m%d %H%M%S"
                 )
+                pbar.update((last_date + delta - current_start) / delta)
                 current_start = last_date + delta
 
         except Exception as e:
             log.error(f"Download error for ticker {ticker}: {str(e)}")
             break
 
+    pbar.close()
     date = pd.to_datetime(result_df["<DATE>"])
     log.info(
         f"Downloaded dates range for ticker {ticker} : "
@@ -236,24 +245,107 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
         "Чистый долг, млрд руб",
     ]
 
+    smartlab_mapping = {
+        "Капитализация": "Капитализация, млрд руб",
+        "Долг": "Долг, млрд руб",
+        "Чистый долг": "Чистый долг, млрд руб",
+    }
+
     macro = None
     for company in companies_list:
-        tmp = pd.read_csv(f"data/multiplicators/{company}.csv", sep=";")
-        tmp.columns = ["characteristic"] + list(tmp.columns)[1:]
+        df = None
 
-        tmp = (
-            tmp.assign(temp=lambda x: 1 * tmp["characteristic"].isin(multipliers))
-            .query("temp == 1")
-            .drop(columns="temp")
-            .assign(company=company)
-        )
+        # 1. Try to download from Smart-Lab
+        try:
+            url = f"https://smart-lab.ru/q/{company}/f/q/MSFO/download/"
+            req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
 
-        macro = tmp if macro is None else pd.concat([macro, tmp])
+            with urlopen(req) as response:
+                content = response.read()
+
+            # Check if content looks like CSV (not HTML error)
+            if b"<!DOCTYPE html>" not in content[:100] and len(content) > 100:
+                # Save to backup
+                backup_path = f"data/multiplicators/{company}.csv"
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                with open(backup_path, "wb") as f:
+                    f.write(content)
+
+                log.info(f"Updated multipliers backup for {company}")
+
+                df = pd.read_csv(BytesIO(content), sep=';')
+            else:
+                log.warning(f"Downloaded content for {company} does not look like CSV")
+
+        except Exception as e:
+            log.warning(f"Failed to download multipliers for {company} from Smart-Lab: {e}")
+
+        # 2. Fallback to backup CSV
+        if df is None:
+            try:
+                df = pd.read_csv(f"data/multiplicators/{company}.csv", sep=";")
+                log.info(f"Loaded multipliers for {company} from backup CSV")
+            except Exception as e:
+                log.error(f"Failed to load multipliers for {company} from backup: {e}")
+                continue
+
+        # 3. Process DataFrame
+        try:
+            # Ensure first column is 'characteristic'
+            df.columns = ['characteristic'] + list(df.columns[1:])
+
+            # Apply mapping
+            df['characteristic'] = df['characteristic'].map(lambda x: smartlab_mapping.get(x, x))
+
+            # Filter rows
+            df = df[df['characteristic'].isin(multipliers)]
+
+            if df.empty:
+                log.warning(f"No valid multipliers found for {company}")
+                continue
+
+            # Rename columns (dates)
+            new_cols = {'characteristic': 'characteristic'}
+            for col in df.columns[1:]:
+                # Try DD.MM.YYYY
+                try:
+                    dt = datetime.strptime(col, "%d.%m.%Y")
+                    q = (dt.month - 1) // 3 + 1
+                    new_cols[col] = f"{dt.year}_{q}"
+                    continue
+                except ValueError:
+                    pass
+
+                # Try YYYYQ#
+                try:
+                    if len(col) == 6 and col[4] == 'Q':
+                        year = int(col[:4])
+                        q = int(col[5])
+                        new_cols[col] = f"{year}_{q}"
+                        continue
+                except ValueError:
+                    pass
+
+            df = df.rename(columns=new_cols)
+
+            # Keep only valid columns (YYYY_Q)
+            valid_cols = ['characteristic'] + [c for c in df.columns if '_' in c and c != 'characteristic']
+            df = df[valid_cols]
+
+            tmp = df.assign(company=company)
+            macro = tmp if macro is None else pd.concat([macro, tmp])
+
+        except Exception as e:
+            log.error(f"Error processing data for {company}: {e}")
+            continue
+
+    if macro is None:
+        return pd.DataFrame()
 
     macro = macro.rename(
         columns={
             f"{year}Q{q}": f"{year}_{q}"
-            for year in range(2000, 2025)
+            for year in range(2000, 2030)
             for q in range(1, 5)
         }
     )
@@ -262,7 +354,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
         ["company", "characteristic"]
         + [
             f"{year}_{q}"
-            for year in range(2014, 2025)
+            for year in range(2014, 2030)
             for q in range(1, 5)
             if f"{year}_{q}" in macro.columns
         ]
@@ -293,10 +385,17 @@ def get_rubusd_exchange_rate(
 
     if os.path.exists(rubusd_df_path):
         rates = pd.read_csv(rubusd_df_path)
-        start_date = rates.date.max()
+        # Start from the next day after the last available date
+        last_date = pd.to_datetime(rates.date.max())
+        start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
     else:
         rates = None
         start_date = dt_start
+
+    # Check if we need to download anything
+    if pd.to_datetime(start_date) > pd.to_datetime(dt_calc):
+        log.info("Exchange rates are up to date.")
+        return rates
 
     date_range = pd.date_range(
         start=pd.to_datetime(start_date, format="%Y-%m-%d"),
@@ -304,23 +403,29 @@ def get_rubusd_exchange_rate(
         freq="D",
     )
 
-    if start_date != dt_calc:
+    if not date_range.empty:
         rates_additional = []
         log.info(
             f"Downloading new usd/rub exchange rates from {start_date} to {dt_calc}"
         )
         for date in tqdm(date_range):
-            rates_additional.append(
-                (date.strftime("%Y-%m-%d"), float(ExchangeRates(date)["USD"].value))
-            )
+            for attempt in range(3):
+                try:
+                    rate = float(ExchangeRates(date)["USD"].value)
+                    rates_additional.append(
+                        (date.strftime("%Y-%m-%d"), rate)
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        log.error(f"Failed to fetch rate for {date} after 3 attempts: {e}")
+                    else:
+                        time.sleep(1)  # Wait 1 second before retrying
 
-        rates = (
-            pd.DataFrame(rates_additional, columns=["date", "rubusd_exchange_rate"])
-            if rates is None
-            else pd.concat(
-                [rates, pd.DataFrame(rates_additional, columns=rates.columns)]
-            )
-        )
+        if rates_additional:
+            new_rates = pd.DataFrame(rates_additional, columns=["date", "rubusd_exchange_rate"])
+            rates = new_rates if rates is None else pd.concat([rates, new_rates])
+
 
     if update_backup:
         rates.to_csv(rubusd_df_path, index=False)
