@@ -77,18 +77,37 @@ def _log_dataframe(self, df, title: str = None) -> None:
         self.info(f"{title}: Empty DataFrame")
         return
 
-    if title:
-        self.info("=" * 60)
-        self.info(f"{title}")
-        self.info("-" * 60)
+    col_widths = []
+    for col in df.columns:
+        max_data_len = df[col].astype(str).map(len).max() if not df[col].empty else 0
+        max_len = max(max_data_len, len(str(col)))
+        col_widths.append(max_len)
 
-    # Convert DataFrame to string with borders
-    df_str = df.to_string(index=False)
-    for line in df_str.split('\n'):
-        self.info(line)
+    header_parts = []
+    for i, col in enumerate(df.columns):
+        if i == 0:
+            header_parts.append(str(col).ljust(col_widths[i]))
+        else:
+            header_parts.append(str(col).rjust(col_widths[i]))
+    header_str = "  ".join(header_parts)
+
+    row_strings = []
+    for _, row in df.iterrows():
+        row_parts = []
+        for i, col in enumerate(df.columns):
+            val = str(row[col])
+            if i == 0:
+                row_parts.append(val.ljust(col_widths[i]))
+            else:
+                row_parts.append(val.rjust(col_widths[i]))
+        row_strings.append("  ".join(row_parts))
+
+    df_str = header_str + "\n" + "\n".join(row_strings)
 
     if title:
-        self.info("=" * 60)
+        self.info(f"{title}\n{df_str}")
+    else:
+        self.info(df_str)
 
 class PrintHandler(logging.Handler):
     """

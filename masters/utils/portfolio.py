@@ -21,9 +21,10 @@ from sklearn.linear_model import Ridge
 import sys
 import matplotlib
 from datetime import datetime, timedelta
+import re
 
-# Логгер будет создаваться в каждом экземпляре Portfolio отдельно
 
+log = Logger(__name__)
 
 class Portfolio:
     def __init__(
@@ -32,17 +33,18 @@ class Portfolio:
         self.dt_calc = dt_calc
         self.dt_start = dt_start
         self.stocks_step = stocks_step
-        self.multipliers = None
-        self.stocks = None
         self.tickers_list = tickers_list
-        self.portfolio = None
-        self.macro_connection_summary = None
+
+        # Dictionary to store all dataframes
+        self.d = {
+            'stocks': None,
+            'multipliers': None,
+            'portfolio': None,
+            'macro_connection_summary': None
+        }
+
         self.end_time = None
         self.start_time = None
-        # Создаем логгер для этого экземпляра Portfolio
-        self._logger_wrapper = Logger(f'{__name__}.Portfolio')
-        self.logger = self._logger_wrapper.get_logger()
-        self.logger.info('Portfolio instance created with dt_calc=%s, dt_start=%s', dt_calc, dt_start)
 
     def log_system_info(self):
         """
@@ -51,33 +53,21 @@ class Portfolio:
         Returns:
             Portfolio: Updated portfolio with logged system information.
         """
-
         self.start_time = datetime.now()
 
-        self.logger.info("=" * 60)
-        self.logger.info(
-            f"ANALYSIS STARTED | Python {sys.version} | Matplotlib {matplotlib.__version__}"
-        )
-        self.logger.info("=" * 60)
+        # Ensure propagation is disabled to prevent root logger interference
+        log.propagate = False
 
-        return self
-
-    def log_completion(self):
-        """
-        Logs the completion of the analysis.
-
-        Returns:
-            Portfolio: Updated portfolio with logged completion.
-        """
-
-        self.end_time = datetime.now()
-
-        self.logger.info("=" * 60)
-        self.logger.info(
-            "ANALYSIS COMPLETED | Duration: %.1f sec",
-            (self.end_time - self.start_time).total_seconds(),
-        )
-        self.logger.info("=" * 60)
+        # Log Configuration Parameters
+        params = [
+            {"Parameter": "Calculation Date", "Value": self.dt_calc},
+            {"Parameter": "Start Date", "Value": self.dt_start},
+            {"Parameter": "Stocks Step", "Value": self.stocks_step},
+            {"Parameter": "Tickers Count", "Value": len(self.tickers_list)},
+            {"Parameter": "Tickers", "Value": ", ".join(self.tickers_list)},
+        ]
+        df_params = pd.DataFrame(params)
+        log.log_dataframe(df_params, title="Configuration Parameters")
 
         return self
 
@@ -101,42 +91,89 @@ class Portfolio:
             Portfolio: Updated portfolio with loaded stock data.
         """
 
-        if use_backup_data:
-            if not os.path.isfile(backup_path):
-                log.error(f"Backup file was not found: {backup_path}")
-                raise Exception  # TODO specify exception list for this project
+        target_tickers = self.tickers_list if tickers_list is None else tickers_list
+        existing_data = None
+        download_start_date = self.dt_start
 
-            with open(backup_path, "rb") as f:
-                self.stocks = pickle.load(f)
+        # 1. Try to load from backup
+        if use_backup_data and os.path.isfile(backup_path):
+            try:
+                with open(backup_path, "rb") as f:
+                    existing_data = pickle.load(f)
 
-            self.logger.info("Stocks data loaded from backup | Records: %d", self.stocks.shape[0])
+                if existing_data is not None and not existing_data.empty and '<DATE>' in existing_data.columns:
+                    # Find the last date in backup
+                    existing_data['temp_date'] = pd.to_datetime(existing_data['<DATE>'], format='%Y%m%d')
+                    last_date = existing_data['temp_date'].max()
+                    existing_data = existing_data.drop(columns=['temp_date'])
+
+                    log.info(f"Backup loaded. Last date: {last_date.date()}")
+
+                    calc_date = pd.to_datetime(self.dt_calc)
+                    if last_date < calc_date:
+                        download_start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+                        log.info(f"Need to update data from {download_start_date} to {self.dt_calc}")
+                    else:
+                        log.info("Backup is up to date.")
+                        download_start_date = None # No need to download
+                else:
+                    log.warning("Backup file is empty or has invalid format. Will download from scratch.")
+                    existing_data = None
+            except Exception as e:
+                log.error(f"Error loading backup: {e}. Will download from scratch.")
+                existing_data = None
+
+        # 2. Download new data if needed
+        new_data = None
+        if download_start_date:
+            # Check if start date is not in the future relative to calc date
+            if pd.to_datetime(download_start_date) <= pd.to_datetime(self.dt_calc):
+                try:
+                    new_data = load_stock_data(
+                        tickers_list=target_tickers,
+                        start_date=download_start_date,
+                        end_date=self.dt_calc,
+                        step=self.stocks_step,
+                    )
+                    if new_data is not None:
+                        log.info(f"Downloaded {len(new_data)} new records.")
+                    else:
+                        log.info("No new data available for the requested period.")
+                except Exception as e:
+                    log.error(f"Failed to download stock data: {e}")
+            else:
+                log.info("Download start date is after calculation date. Skipping download.")
+
+        # 3. Combine data
+        if existing_data is not None and new_data is not None:
+            self.d['stocks'] = pd.concat([existing_data, new_data]).drop_duplicates()
+            log.info("Merged backup and new data.")
+        elif existing_data is not None:
+            self.d['stocks'] = existing_data
+        elif new_data is not None:
+            self.d['stocks'] = new_data
         else:
-            self.stocks = load_stock_data(
-                tickers_list=(
-                    self.tickers_list if tickers_list is None else tickers_list
-                ),
-                start_date=self.dt_start,
-                end_date=self.dt_calc,
-                step=self.stocks_step,
-            )
+            if self.d['stocks'] is None:
+                 log.warning("No stock data loaded!")
 
-            self.logger.info(f"Stocks data was loaded from finam")
-
-        if create_backup:
+        # 4. Update backup if requested
+        if create_backup and self.d['stocks'] is not None:
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
             with open(backup_path, "wb") as f:
-                pickle.dump(self.stocks, f)
+                pickle.dump(self.d['stocks'], f)
+            log.info(f"Backup updated: {backup_path}")
 
-            self.logger.info(f"Backup file was saved: {backup_path}")
-
-        self.stocks = (
-            self.stocks.rename(
-                columns={col: col[1:-1].lower() for col in self.stocks.columns}
+        # 5. Process data (rename columns, etc.)
+        if self.d['stocks'] is not None:
+            self.d['stocks'] = (
+                self.d['stocks'].rename(
+                    columns={col: col[1:-1].lower() for col in self.d['stocks'].columns}
+                )
+                .assign(date=lambda x: pd.to_datetime(x["date"]))
+                .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
+                .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
+                .drop(columns=["per", "vol"])
             )
-            .assign(date=lambda x: pd.to_datetime(x["date"]) + pd.offsets.MonthEnd(0))
-            .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
-            .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
-            .drop(columns=["per", "vol"])
-        )
 
         return self
 
@@ -151,13 +188,13 @@ class Portfolio:
             Portfolio: Updated portfolio with loaded multipliers data.
         """
 
-        self.multipliers = load_multipliers(
+        self.d['multipliers'] = load_multipliers(
             companies_list=self.tickers_list if tickers_list is None else tickers_list,
         )
 
-        self.multipliers = (
+        self.d['multipliers'] = (
             pd.melt(
-                self.multipliers,
+                self.d['multipliers'],
                 id_vars=["company", "characteristic"],
                 var_name="year_quarter",
                 value_name="value",
@@ -172,7 +209,7 @@ class Portfolio:
             .rename(columns={"company": "ticker"})
         )
 
-        self.logger.info("Multipliers data loaded | Features: %s", list(self.multipliers.columns))
+        log.info("Multipliers data loaded | Features: %s", list(self.d['multipliers'].columns))
 
         return self
 
@@ -184,11 +221,11 @@ class Portfolio:
             Portfolio: Created portfolio.
         """
 
-        self.portfolio = self.stocks.merge(
-            self.multipliers, on=["ticker", "year", "quarter"], how="left"
+        self.d['portfolio'] = self.d['stocks'].merge(
+            self.d['multipliers'], on=["ticker", "year", "quarter"], how="left"
         )
 
-        self.logger.info("Portfolio created | Companies: %d", len(self.portfolio.ticker.unique()))
+        log.info("Portfolio created | Companies: %d", len(self.d['portfolio'].ticker.unique()))
 
         return self
 
@@ -221,42 +258,42 @@ class Portfolio:
         ]
 
         for col in column_to_adjust:
-            self.portfolio[col] = self.portfolio[col].str.replace(" ", "", regex=False)
-            self.portfolio[col] = pd.to_numeric(self.portfolio[col], errors="coerce")
+            self.d['portfolio'][col] = self.d['portfolio'][col].str.replace(" ", "", regex=False)
+            self.d['portfolio'][col] = pd.to_numeric(self.d['portfolio'][col], errors="coerce")
             if "млрд руб" in col:
-                self.portfolio[col] *= 1e9
+                self.d['portfolio'][col] *= 1e9
 
-        self.portfolio["Долг, млрд руб"] = np.select(
+        self.d['portfolio']["Долг, млрд руб"] = np.select(
             [
-                (self.portfolio["Долг, млрд руб"].notna())
-                & (self.portfolio["Долг, млрд руб"].ne(0)),
-                (self.portfolio["Долг, млрд руб"].isna())
+                (self.d['portfolio']["Долг, млрд руб"].notna())
+                & (self.d['portfolio']["Долг, млрд руб"].ne(0)),
+                (self.d['portfolio']["Долг, млрд руб"].isna())
                 & (
-                    (self.portfolio["Чистый долг, млрд руб"].isna())
-                    | (self.portfolio["Чистый долг, млрд руб"].eq(0))
+                    (self.d['portfolio']["Чистый долг, млрд руб"].isna())
+                    | (self.d['portfolio']["Чистый долг, млрд руб"].eq(0))
                 ),
-                (self.portfolio["Долг, млрд руб"].isna())
-                & (self.portfolio["Чистый долг, млрд руб"].notna())
-                & (self.portfolio["Чистый долг, млрд руб"].ne(0)),
+                (self.d['portfolio']["Долг, млрд руб"].isna())
+                & (self.d['portfolio']["Чистый долг, млрд руб"].notna())
+                & (self.d['portfolio']["Чистый долг, млрд руб"].ne(0)),
             ],
             [
-                self.portfolio["Долг, млрд руб"],
-                self.portfolio["Долг, млрд руб"],
-                self.portfolio["Чистый долг, млрд руб"],
+                self.d['portfolio']["Долг, млрд руб"],
+                self.d['portfolio']["Долг, млрд руб"],
+                self.d['portfolio']["Чистый долг, млрд руб"],
             ],
         )
 
-        self.portfolio["Долг, млрд руб"] = np.where(
-            self.portfolio["Долг, млрд руб"] < 0,
-            np.abs(self.portfolio["Долг, млрд руб"]),
-            self.portfolio["Долг, млрд руб"],
+        self.d['portfolio']["Долг, млрд руб"] = np.where(
+            self.d['portfolio']["Долг, млрд руб"] < 0,
+            np.abs(self.d['portfolio']["Долг, млрд руб"]),
+            self.d['portfolio']["Долг, млрд руб"],
         )
 
-        self.portfolio = self.portfolio.rename(columns=columns_new_names).drop(
+        self.d['portfolio'] = self.d['portfolio'].rename(columns=columns_new_names).drop(
             columns=["Чистый долг, млрд руб"]
         )
 
-        self.logger.info("Column types adjusted: %s", column_to_adjust)
+        log.info("Column types adjusted: %s", column_to_adjust)
 
         return self
 
@@ -277,14 +314,14 @@ class Portfolio:
         inflation["date"] = pd.to_datetime(inflation["Дата"])
         rub_usd["date"] = pd.to_datetime(rub_usd["date"])
 
-        self.portfolio = (
-            self.portfolio.merge(inflation, on="date", how="left")
+        self.d['portfolio'] = (
+            self.d['portfolio'].merge(inflation, on="date", how="left")
             .merge(unemployment, left_on="year", right_on="Year", how="left")
             .merge(rub_usd, on="date", how="left")
             .drop(columns=["Дата", "Цель по инфляции"])
         )
 
-        self.portfolio = self.portfolio.rename(
+        self.d['portfolio'] = self.d['portfolio'].rename(
             columns={
                 "Ключевая ставка, % годовых": "interest_rate",
                 "Инфляция, % г/г": "inflation",
@@ -294,9 +331,9 @@ class Portfolio:
         )
 
         for col in ["inflation", "interest_rate", "unemployment_rate"]:
-            self.portfolio[col] /= 100
+            self.d['portfolio'][col] /= 100
 
-        self.logger.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
+        log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
 
         return self
 
@@ -308,24 +345,31 @@ class Portfolio:
             Portfolio: Updated portfolio with missing values filled.
         """
 
-        self.portfolio = self.portfolio.sort_values(by=["ticker", "date"])
+        self.d['portfolio'] = self.d['portfolio'].sort_values(by=["ticker", "date"])
 
         missing = {}
-        columns_to_fill = ["debt", "capitalization", "rubusd_exchange_rate"]
+        columns_to_fill = [
+            "debt",
+            "capitalization",
+            "rubusd_exchange_rate",
+            "inflation",
+            "interest_rate",
+            "unemployment_rate",
+        ]
         for col in columns_to_fill:
 
-            missing[col] = self.portfolio[col].isna().sum() / self.portfolio.shape[0]
-            self.portfolio[col] = self.portfolio.groupby("ticker")[col].transform(
+            missing[col] = self.d['portfolio'][col].isna().sum() / self.d['portfolio'].shape[0]
+            self.d['portfolio'][col] = self.d['portfolio'].groupby("ticker")[col].transform(
                 lambda x: x.ffill().bfill()
             )
 
         # Log missing values summary using the logger's pretty print method
-        self._logger_wrapper.log_missing_values_summary(
+        log.log_missing_values_summary(
             missing_dict=missing,
             title="Missing Values Summary (Before Filling)"
         )
 
-        self.logger.info(f"Missing values filled in: {columns_to_fill}")
+        log.info(f"Missing values filled in: {columns_to_fill}")
 
         return self
 
@@ -340,9 +384,9 @@ class Portfolio:
             Portfolio: Updated portfolio with calculated capital cost and capital volatility.
         """
 
-        E = self.portfolio["capitalization"].values.astype(float)
-        D = self.portfolio["debt"].values.astype(float)
-        sigma_E = self.portfolio["quarterly_volatility"].values.astype(float)
+        E = self.d['portfolio']["capitalization"].values.astype(float)
+        D = self.d['portfolio']["debt"].values.astype(float)
+        sigma_E = self.d['portfolio']["quarterly_volatility"].values.astype(float)
 
         def equations(vars, E_i, D_i, r_i, sigma_E_i, T_i):
             V, sigma_V = vars
@@ -369,7 +413,7 @@ class Portfolio:
                     args=(
                         E[i],
                         D[i],
-                        self.portfolio["interest_rate"][i],
+                        self.d['portfolio']["interest_rate"][i],
                         sigma_E[i],
                         T,
                     ),
@@ -378,10 +422,10 @@ class Portfolio:
             ]
         )
 
-        self.portfolio["V"] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
-        self.portfolio["sigma_V"] = results[:, 1]
+        self.d['portfolio']["V"] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
+        self.d['portfolio']["sigma_V"] = results[:, 1]
 
-        self.logger.info(f"Capital cost and capital volatility calculated.")
+        log.info(f"Capital cost and capital volatility calculated.")
 
         return self
 
@@ -396,17 +440,17 @@ class Portfolio:
             Portfolio: Updated portfolio with calculated probabilities of default.
         """
 
-        V = self.portfolio["V"].values.astype(float)
-        D = self.portfolio["debt"].values.astype(float)
-        sigma_V = self.portfolio["sigma_V"]
+        V = self.d['portfolio']["V"].values.astype(float)
+        D = self.d['portfolio']["debt"].values.astype(float)
+        sigma_V = self.d['portfolio']["sigma_V"]
 
         d2 = (
             np.log(V / np.where(D != 0, D, 1e-6))
-            + (self.portfolio["interest_rate"] - 0.5 * sigma_V**2) * T
+            + (self.d['portfolio']["interest_rate"] - 0.5 * sigma_V**2) * T
         ) / (sigma_V * np.sqrt(T))
-        self.portfolio["PD"] = norm.cdf(-d2)
+        self.d['portfolio']["PD"] = norm.cdf(-d2)
 
-        self.logger.info(f"Merton's probabilities of default calculated.")
+        log.info(f"Merton's probabilities of default calculated.")
 
         return self
 
@@ -419,7 +463,7 @@ class Portfolio:
         """
         self = self._solve_merton_vectorized()._merton_pd()
 
-        self.portfolio = self.portfolio.drop(columns=["V", "sigma_V"])
+        self.d['portfolio'] = self.d['portfolio'].drop(columns=["V", "sigma_V"])
 
         return self
 
@@ -444,7 +488,7 @@ class Portfolio:
 
             save_path = f"logs/graphs/{ticker}_pd.png"
 
-            data = self.portfolio.query(f"ticker == '{ticker}'")
+            data = self.d['portfolio'].query(f"ticker == '{ticker}'")
 
             if data.empty:
                 log.warning(f"No data for ticker {ticker}")
@@ -478,7 +522,7 @@ class Portfolio:
             plt.close()
 
         if tickers:
-            self.logger.info(
+            log.info(
                 "PD graphs saved | "
                 f"Companies: {len(tickers)} | "
                 f"Path: logs/graphs/"
@@ -511,7 +555,7 @@ class Portfolio:
             list(impulses_responses.keys()) + list(impulses_responses.values())
         )
 
-        data = self.portfolio.sort_values(["ticker", "date"])[columns].dropna()[columns]
+        data = self.d['portfolio'].sort_values(["ticker", "date"])[columns].dropna()[columns]
 
         cols_before_diff = {}
         for col in data.columns:
@@ -519,15 +563,15 @@ class Portfolio:
 
         if any(p > 0.05 for p in cols_before_diff.values()):
 
-            self.logger.info("p-values before differencing:\n%s", pd.Series(cols_before_diff))
+            log.info("p-values before differencing:\n%s", pd.Series(cols_before_diff))
 
             data = data.diff().dropna()
-            self.logger.info("Applied differencing to achieve stationarity")
+            log.info("Applied differencing to achieve stationarity")
 
             for col in data.columns:
                 cols_before_diff[col] = adfuller(data[col].dropna())[1]
 
-            self.logger.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
+            log.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
 
         if not isinstance(data.index, pd.DatetimeIndex):
             data.index = pd.RangeIndex(start=0, stop=len(data))
@@ -536,7 +580,7 @@ class Portfolio:
         lag_order = model.select_order(maxlags=6)
         selected_lags = lag_order.aic
 
-        self.logger.info(
+        log.info(
             f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
         )
 
@@ -578,7 +622,7 @@ class Portfolio:
                 plt.clf()
         plt.close()
 
-        self.logger.info(f"Impulse response functions saved | Path: logs/graphs/")
+        log.info(f"Impulse response functions saved | Path: logs/graphs/")
 
         return self
 
@@ -609,7 +653,7 @@ class Portfolio:
         if save_path is None:
             save_path = f"logs/graphs/corr_matrix.png"
 
-        pivot_data = self.portfolio.pivot_table(
+        pivot_data = self.d['portfolio'].pivot_table(
             index="date", columns="ticker", values="close"
         )
 
@@ -647,7 +691,7 @@ class Portfolio:
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor="white")
-            self.logger.info(f"Correlation matrix saved | Path: {save_path}")
+            log.info(f"Correlation matrix saved | Path: {save_path}")
 
         if verbose:
             plt.show()
@@ -679,7 +723,7 @@ class Portfolio:
 
         for ticker in tickers:
 
-            stock_data = self.portfolio[self.portfolio["ticker"] == ticker]
+            stock_data = self.d['portfolio'][self.d['portfolio']["ticker"] == ticker]
 
             save_path = f"logs/graphs/{ticker}_stock.png"
 
@@ -703,9 +747,9 @@ class Portfolio:
             )
             ax.legend(frameon=True, facecolor="white")
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=7))
-            plt.xticks(rotation=0)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+            plt.xticks(rotation=90)
 
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
@@ -720,7 +764,7 @@ class Portfolio:
             plt.close()
 
         if tickers:
-            self.logger.info(
+            log.info(
                 "Stock prices graphs saved | "
                 f"Companies: {len(tickers)} | "
                 f"Path: logs/graphs/"
@@ -736,23 +780,23 @@ class Portfolio:
             Portfolio: Updated portfolio with added dynamic features.
         """
 
-        self.portfolio["quarterly_volatility"] = self.portfolio.groupby(
+        self.d['portfolio']["quarterly_volatility"] = self.d['portfolio'].groupby(
             ["ticker", pd.Grouper(key="date", freq="QE")]
         )["close"].transform(
             lambda x: np.std(np.log(x / x.shift(1)))
             * np.sqrt(63)  # 63 ≈ среднее число торговых дней в квартале
         )
 
-        self.portfolio["quarterly_volatility"] = (
-            self.portfolio["quarterly_volatility"].rolling(window=10).mean()
+        self.d['portfolio']["quarterly_volatility"] = (
+            self.d['portfolio']["quarterly_volatility"].rolling(window=10).mean()
         )
 
-        self.portfolio["quarterly_volatility"] = self.portfolio[
+        self.d['portfolio']["quarterly_volatility"] = self.d['portfolio'][
             "quarterly_volatility"
         ].bfill()
 
         # Adhoc values for missing quarterly volatility data
-        self.portfolio["quarterly_volatility"] = 0.4
+        self.d['portfolio']["quarterly_volatility"] = 0.4
 
         return self
 
@@ -769,7 +813,7 @@ class Portfolio:
         """
 
         save_path = f"logs/graphs/debt_catitalization.png"
-        grouped = self.portfolio.groupby("ticker")
+        grouped = self.d['portfolio'].groupby("ticker")
 
         for ticker, group in grouped:
 
@@ -822,9 +866,9 @@ class Portfolio:
             plt.close()
 
         if save_path:
-            self.logger.info(
+            log.info(
                 "Capitalization-debt graphs saved | "
-                f"Companies: {len(self.portfolio.ticker.unique())} | "
+                f"Companies: {len(self.d['portfolio'].ticker.unique())} | "
                 f"Path: {save_path}"
             )
 
@@ -845,7 +889,7 @@ class Portfolio:
             Portfolio: Updated portfolio with calculated macroeconomic connections.
         """
 
-        df = self.portfolio.copy()
+        df = self.d['portfolio'].copy()
         targets = ["debt", "capitalization"]
 
         results = []
@@ -963,15 +1007,15 @@ class Portfolio:
         result_df = pd.DataFrame(results)
         result_df = result_df.dropna(subset=["best_alpha"])
 
-        self.macro_connection_summary = result_df
-        self.logger.info("Macro connection summary calculated.")
+        self.d['macro_connection_summary'] = result_df
+        log.info("Macro connection summary calculated.")
 
         return self
 
     def plot_macro_significance(
-        self, 
-        save_path: str = "logs/graphs/macro_significance_summary.png", 
-        verbose: bool = False, 
+        self,
+        save_path: str = "logs/graphs/macro_significance_summary.png",
+        verbose: bool = False,
         figsize: tuple = (10, 6)
     ) -> "Portfolio":
         """
@@ -986,62 +1030,62 @@ class Portfolio:
             Portfolio: Updated portfolio with plotted macro significance.
         """
 
-        if self.macro_connection_summary is None:
+        if self.d['macro_connection_summary'] is None:
             raise ValueError("Macro connection summary not calculated. Run calc_macro_connections() first.")
 
         import re
-        
+
         factors = ['inflation', 'unemployment', 'usd_rub']
         factor_labels = ['Инфляция', 'Безработица', 'USD/RUB']
         significance_data = {'capitalization': [], 'debt': []}
-        
+
         for target in ['capitalization', 'debt']:
-            target_data = self.macro_connection_summary[self.macro_connection_summary['target'] == target]
+            target_data = self.d['macro_connection_summary'][self.d['macro_connection_summary']['target'] == target]
             for factor in factors:
                 ci_col = f'coef_{factor}_ci'
                 significant = sum(
                     1 for _, row in target_data.iterrows()
                     if pd.notna(row[ci_col]) and (
                         lambda nums: len(nums) == 2 and (
-                            (float(nums[0]) > 0 and float(nums[1]) > 0) or 
+                            (float(nums[0]) > 0 and float(nums[1]) > 0) or
                             (float(nums[0]) < 0 and float(nums[1]) < 0)
                         )
                     )(re.findall(r'-?\d+\.\d+', str(row[ci_col])))
                 )
                 total = target_data[ci_col].notna().sum()
                 significance_data[target].append(significant / total * 100 if total > 0 else 0)
-        
+
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         x = np.arange(len(factor_labels))
         width = 0.35
-        
-        cap_bars = ax.bar(x - width/2, significance_data['capitalization'], width, 
+
+        cap_bars = ax.bar(x - width/2, significance_data['capitalization'], width,
                          label='Капитализация', color='steelblue', alpha=0.8)
-        debt_bars = ax.bar(x + width/2, significance_data['debt'], width, 
+        debt_bars = ax.bar(x + width/2, significance_data['debt'], width,
                           label='Долг', color='darkred', alpha=0.8)
-        
+
         ax.set_xlabel('Макроэкономические факторы', fontsize=12, fontweight='bold')
         ax.set_ylabel('Доля значимых связей, %', fontsize=12, fontweight='bold')
-        ax.set_title('Влияние макрофакторов на параметры модели Мертона', 
+        ax.set_title('Влияние макрофакторов на параметры модели Мертона',
                      fontsize=14, fontweight='bold', pad=20)
         ax.set_xticks(x)
         ax.set_xticklabels(factor_labels)
         ax.legend(fontsize=11)
         ax.set_ylim(0, 100)
         ax.grid(axis='y', alpha=0.3, linestyle='--')
-        
+
         for bars in [cap_bars, debt_bars]:
             for bar in bars:
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width()/2., height + 1,
                        f'{height:.0f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
-        
+
         plt.tight_layout()
-        
+
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            self.logger.info(f"Macro significance plot saved | Path: {save_path}")
+            log.info(f"Macro significance plot saved | Path: {save_path}")
 
         if verbose:
             plt.show()
@@ -1080,10 +1124,10 @@ class Portfolio:
             "total_portfolio_limit": 1.0,  # 100% лимит портфеля
         }
 
-        self.logger.info("Лимиты кредитного риска установлены:")
-        self.logger.info(f"   • Максимальная PD: {max_pd_threshold:.1%}")
-        self.logger.info(f"   • Секторная концентрация: {max_sector_concentration:.1%}")
-        self.logger.info(f"   • Доля одного заемщика: {max_single_exposure:.1%}")
+        log.info("Лимиты кредитного риска установлены:")
+        log.info(f"   • Максимальная PD: {max_pd_threshold:.1%}")
+        log.info(f"   • Секторная концентрация: {max_sector_concentration:.1%}")
+        log.info(f"   • Доля одного заемщика: {max_single_exposure:.1%}")
 
         return self
 
@@ -1095,29 +1139,29 @@ class Portfolio:
             Portfolio: Updated portfolio with analysis.
         """
         # Анализ текущих PD в портфеле
-        current_pd_stats = self.portfolio.groupby("ticker")["PD"].last()
+        current_pd_stats = self.d['portfolio'].groupby("ticker")["PD"].last()
 
-        self.logger.info("Текущее состояние потенциальных заемщиков:")
-        self.logger.info(
+        log.info("Текущее состояние потенциальных заемщиков:")
+        log.info(
             f"   • Средняя PD: {current_pd_stats.mean():.3f} ({current_pd_stats.mean()*100:.2f}%)"
         )
-        self.logger.info(
+        log.info(
             f"   • Компании с PD <= 5%: {(current_pd_stats <= 0.05).sum()}/{len(current_pd_stats)}"
         )
-        self.logger.info(
+        log.info(
             f"   • Компании с высоким риском (PD > 5%): {(current_pd_stats > 0.05).sum()}"
         )
 
         # Показываем топ-5 самых надежных и рискованных
-        self.logger.info("ТОП-5 НАИБОЛЕЕ НАДЕЖНЫХ ЗАЕМЩИКОВ:")
+        log.info("ТОП-5 НАИБОЛЕЕ НАДЕЖНЫХ ЗАЕМЩИКОВ:")
         safest = current_pd_stats.sort_values().head(5)
         for ticker, pd_val in safest.items():
-            self.logger.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
+            log.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
 
-        self.logger.info("ТОП-5 НАИБОЛЕЕ РИСКОВАННЫХ ЗАЕМЩИКОВ:")
+        log.info("ТОП-5 НАИБОЛЕЕ РИСКОВАННЫХ ЗАЕМЩИКОВ:")
         riskiest = current_pd_stats.sort_values(ascending=False).head(5)
         for ticker, pd_val in riskiest.items():
-            self.logger.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
+            log.info(f"   {ticker}: PD = {pd_val:.3f} ({pd_val*100:.2f}%)")
 
         return self
 
@@ -1143,7 +1187,7 @@ class Portfolio:
             self.create_credit_risk_limits()
 
         # Получаем текущую PD заемщика
-        latest_data = self.portfolio[self.portfolio["ticker"] == borrower_ticker].tail(
+        latest_data = self.d['portfolio'][self.d['portfolio']["ticker"] == borrower_ticker].tail(
             1
         )
 
@@ -1349,11 +1393,11 @@ class Portfolio:
             dict: Отчет о состоянии портфеля с предупреждениями
         """
 
-        if self.portfolio is None or self.portfolio.empty:
+        if self.d['portfolio'] is None or self.d['portfolio'].empty:
             return {"error": "Portfolio data not available"}
 
         # Анализ текущих PD по всему портфелю
-        latest_data = self.portfolio.groupby("ticker").last()
+        latest_data = self.d['portfolio'].groupby("ticker").last()
 
         # Статистики PD
         pd_stats = {
@@ -1381,10 +1425,10 @@ class Portfolio:
             )
 
         # Проверка роста PD (требует исторических данных)
-        if len(self.portfolio) > len(self.tickers_list):  # есть история
+        if len(self.d['portfolio']) > len(self.tickers_list):  # есть история
             pd_changes = {}
             for ticker in self.tickers_list:
-                ticker_data = self.portfolio[self.portfolio["ticker"] == ticker]["PD"]
+                ticker_data = self.d['portfolio'][self.d['portfolio']["ticker"] == ticker]["PD"]
                 if len(ticker_data) >= 2:
                     recent_change = ticker_data.iloc[-1] - ticker_data.iloc[-2]
                     if recent_change > 0.01:  # рост PD более чем на 1%
@@ -1465,60 +1509,60 @@ class Portfolio:
             Portfolio: Updated portfolio with generated report
         """
 
-        self.logger.info("=" * 80)
-        self.logger.info("ОТЧЕТ ПО УПРАВЛЕНИЮ КРЕДИТНЫМ ПОРТФЕЛЕМ")
-        self.logger.info("=" * 80)
+        log.info("=" * 80)
+        log.info("ОТЧЕТ ПО УПРАВЛЕНИЮ КРЕДИТНЫМ ПОРТФЕЛЕМ")
+        log.info("=" * 80)
 
         # 1. Текущее состояние портфеля
         health_report = self.monitor_credit_portfolio_health()
 
-        self.logger.info(
+        log.info(
             f"\n1. СОСТОЯНИЕ ПОРТФЕЛЯ (Оценка: {health_report['portfolio_health_score']:.1f}/100)"
         )
-        self.logger.info("-" * 50)
+        log.info("-" * 50)
 
         pd_stats = health_report["pd_statistics"]
-        self.logger.info(
+        log.info(
             f"Средняя PD портфеля: {pd_stats['mean_pd']:.3f} ({pd_stats['mean_pd']*100:.2f}%)"
         )
-        self.logger.info(f"Медианная PD: {pd_stats['median_pd']:.3f}")
-        self.logger.info(f"Диапазон PD: {pd_stats['min_pd']:.3f} - {pd_stats['max_pd']:.3f}")
-        self.logger.info(f"Количество заемщиков: {pd_stats['companies_count']}")
+        log.info(f"Медианная PD: {pd_stats['median_pd']:.3f}")
+        log.info(f"Диапазон PD: {pd_stats['min_pd']:.3f} - {pd_stats['max_pd']:.3f}")
+        log.info(f"Количество заемщиков: {pd_stats['companies_count']}")
 
         # 2. Предупреждения о рисках
         if health_report["risk_warnings"]:
-            self.logger.info(
+            log.info(
                 f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ ({len(health_report['risk_warnings'])} активных)"
             )
-            self.logger.info("-" * 50)
+            log.info("-" * 50)
             for warning in health_report["risk_warnings"]:
                 log.warning(f"⚠️  {warning['message']}")
                 if "companies" in warning and isinstance(warning["companies"], list):
                     log.warning(f"    Компании: {', '.join(warning['companies'])}")
         else:
-            self.logger.info(f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ")
-            self.logger.info("-" * 50)
-            self.logger.info("✅ Критических рисков не выявлено")
+            log.info(f"\n2. ПРЕДУПРЕЖДЕНИЯ О РИСКАХ")
+            log.info("-" * 50)
+            log.info("✅ Критических рисков не выявлено")
 
         # 3. Секторный анализ
-        self.logger.info(f"\n3. АНАЛИЗ ПО СЕКТОРАМ")
-        self.logger.info("-" * 50)
+        log.info(f"\n3. АНАЛИЗ ПО СЕКТОРАМ")
+        log.info("-" * 50)
         sector_analysis = health_report["sector_analysis"]
 
-        self.logger.info(f"{'Сектор':<15} {'Средняя PD':<12} {'Макс PD':<10} {'Компании':<10}")
-        self.logger.info("-" * 50)
+        log.info(f"{'Сектор':<15} {'Средняя PD':<12} {'Макс PD':<10} {'Компании':<10}")
+        log.info("-" * 50)
         for sector in sector_analysis["mean"].keys():
             mean_pd = sector_analysis["mean"][sector]
             max_pd = sector_analysis["max"][sector]
             count = sector_analysis["count"][sector]
-            self.logger.info(
+            log.info(
                 f"{sector:<15} {mean_pd:.3f} ({mean_pd*100:>5.2f}%) {max_pd:.3f} ({max_pd*100:>5.2f}%) {count:>8}"
             )
 
         # 4. Решения по кредитам (если предоставлены)
         if loan_decisions:
-            self.logger.info(f"\n4. РЕШЕНИЯ ПО КРЕДИТНЫМ ЗАЯВКАМ ({len(loan_decisions)} заявок)")
-            self.logger.info("-" * 50)
+            log.info(f"\n4. РЕШЕНИЯ ПО КРЕДИТНЫМ ЗАЯВКАМ ({len(loan_decisions)} заявок)")
+            log.info("-" * 50)
 
             approved = [d for d in loan_decisions if d.get("decision") == "ОДОБРИТЬ"]
             rejected = [d for d in loan_decisions if d.get("decision") == "ОТКЛОНИТЬ"]
@@ -1526,40 +1570,60 @@ class Portfolio:
                 d for d in loan_decisions if d.get("decision") == "УСЛОВНО ОДОБРИТЬ"
             ]
 
-            self.logger.info(f"✅ Одобрено: {len(approved)} заявок")
-            self.logger.info(f"❌ Отклонено: {len(rejected)} заявок")
-            self.logger.info(f"⚠️  Условно одобрено: {len(conditional)} заявок")
+            log.info(f"✅ Одобрено: {len(approved)} заявок")
+            log.info(f"❌ Отклонено: {len(rejected)} заявок")
+            log.info(f"⚠️  Условно одобрено: {len(conditional)} заявок")
 
             if approved:
                 total_approved_amount = sum(d.get("loan_amount", 0) for d in approved)
                 avg_rate = sum(d.get("recommended_rate", 0) for d in approved) / len(
                     approved
                 )
-                self.logger.info(
+                log.info(
                     f"Общая сумма одобренных кредитов: {total_approved_amount:,.0f} руб."
                 )
-                self.logger.info(f"Средняя рекомендованная ставка: {avg_rate:.2%}")
+                log.info(f"Средняя рекомендованная ставка: {avg_rate:.2%}")
 
         # 5. Рекомендации
-        self.logger.info(f"\n5. РЕКОМЕНДАЦИИ ПО УПРАВЛЕНИЮ")
-        self.logger.info("-" * 50)
+        log.info(f"\n5. РЕКОМЕНДАЦИИ ПО УПРАВЛЕНИЮ")
+        log.info("-" * 50)
         for i, rec in enumerate(health_report["recommendations"], 1):
-            self.logger.info(f"{i}. {rec}")
+            log.info(f"{i}. {rec}")
 
         if not health_report["recommendations"]:
-            self.logger.info(
+            log.info(
                 "✅ Портфель находится в хорошем состоянии. Текущая стратегия эффективна."
             )
 
-        self.logger.info(f"\n{'=' * 80}")
-        self.logger.info(f"Отчет сгенерирован: {health_report['monitoring_date']}")
-        self.logger.info(f"{'=' * 80}")
+        log.info(f"\n{'=' * 80}")
+        log.info(f"Отчет сгенерирован: {health_report['monitoring_date']}")
+        log.info(f"{'=' * 80}")
 
         # Сохранение отчета в файл (опционально)
         if save_path:
             # Здесь можно добавить сохранение в файл
-            self.logger.info(f"Credit portfolio report would be saved to: {save_path}")
+            log.info(f"Credit portfolio report would be saved to: {save_path}")
 
-        self.logger.info("Credit portfolio management report generated")
+        log.info("Credit portfolio management report generated")
+
+        return self
+
+
+    def log_completion(self):
+        """
+        Logs the completion of the analysis.
+
+        Returns:
+            Portfolio: Updated portfolio with logged completion.
+        """
+
+        self.end_time = datetime.now()
+
+        log.info("=" * 60)
+        log.info(
+            "ANALYSIS COMPLETED | Duration: %.1f sec",
+            (self.end_time - self.start_time).total_seconds(),
+        )
+        log.info("=" * 60)
 
         return self
