@@ -1,138 +1,104 @@
 import logging
 import sys
 import os
-from datetime import datetime
-import pandas as pd
+import types
+from typing import Optional
 
+# Prevent matplotlib from spamming
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
+DEFAULT_LOG_FILE = os.path.join("logs", "app.log")
+FORMAT = "%(asctime)s:%(name)s:%(levelname)s: %(message)s"
 
-class Logger:
+def _log_missing_values_summary(self, missing_dict: dict, title: str = "Missing Values Summary") -> None:
+    """Custom method attached to logger instances."""
+    if not missing_dict:
+        self.info(f"{title}: none")
+        return
+
+    self.info("=" * 60)
+    self.info(f"{title}")
+    self.info("-" * 60)
+    for col, val in missing_dict.items():
+        val_str = f"{val:.2%}" if isinstance(val, float) and 0 <= val <= 1 else str(val)
+        self.info(f"{col:<30} | {val_str}")
+    self.info("=" * 60)
+
+def Logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[str] = None) -> logging.Logger:
     """
-    A wrapper class for standard logging with shared file output.
-
-    This logger ensures all instances write to the same log file and provides
-    consistent formatting across the application. It automatically creates
-    the log directory if it doesn't exist.
-
-    Attributes:
-        _log_file (str): Shared log file path for all instances
-        _initialized (bool): Flag tracking initialization status
-        _configured_loggers (set): Track which loggers have been configured
+    Factory function that configures and returns a standard logging.Logger.
+    Attaches a FileHandler and a StreamHandler (console).
     """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.propagate = False
 
-    _log_file: str = f"logs/app_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-    _initialized: bool = False
-    _configured_loggers: set = set()  # Class-level tracking of configured loggers
+    # Clear existing handlers to avoid duplication (notebook friendly)
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-    def __init__(
-        self,
-        name: str,
-        level: int = logging.INFO,
-        format: str = "%(asctime)s:%(name)s:%(levelname)s: %(message)s",
-    ) -> None:
-        """
-        Initialize the logger instance.
+    # Double check to ensure no handlers remain
+    logger.handlers = []
 
-        Args:
-            name: Logger name (typically __name__)
-            level: Logging level (default: INFO)
-            format: Message format string
-        """
-        self.logger: logging.Logger = logging.getLogger(name)
-        self.logger.setLevel(level)
-        
-        # IMPORTANT: Set propagate to False to prevent duplicate output
-        # Each logger manages its own handlers independently
-        self.logger.propagate = False
-        
-        # Configure handlers for this logger instance ONLY if not already configured
-        self._setup_handlers(format)
+    formatter = logging.Formatter(FORMAT)
 
-    def _setup_handlers(self, format: str) -> None:
-        """
-        Configure logging handlers for this logger instance.
+    # 1. File Handler
+    log_path = log_file or DEFAULT_LOG_FILE
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
-        Sets up both console and file handlers with consistent formatting.
-        Creates log directory if it doesn't exist.
-        Uses class-level tracking to ensure handlers are only added once per logger name.
+    # 2. Console Handler
+    # Use PrintHandler for better compatibility with Jupyter/VS Code
+    console_handler = PrintHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
-        Args:
-            format: Format string for log messages
-        """
-        # Check if THIS SPECIFIC logger name has already been configured
-        logger_name = self.logger.name
-        if logger_name in Logger._configured_loggers:
-            return
-            
-        formatter = logging.Formatter(format)
+    # Attach custom method dynamically to satisfy existing code usage
+    # (logger.log_missing_values_summary)
+    logger.log_missing_values_summary = types.MethodType(_log_missing_values_summary, logger)
+    logger.log_dataframe = types.MethodType(_log_dataframe, logger)
 
-        log_dir = os.path.dirname(Logger._log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
+    return logger
 
-        # Add console handler - using stderr to avoid conflicts with Jupyter output
-        # sys.stderr works better than sys.stdout in Jupyter notebooks  
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
-        
-        # Add file handler
-        file_handler = logging.FileHandler(Logger._log_file)
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
-        
-        # Mark this logger as configured
-        Logger._configured_loggers.add(logger_name)
+def get_logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[str] = None) -> logging.Logger:
+    return Logger(name, level, log_file)
 
-    def get_logger(self) -> logging.Logger:
-        """
-        Get the configured logger instance.
+# Keep standalone function for compatibility if imported directly
+def log_missing_values_summary(logger_obj: logging.Logger, missing_dict: dict, title: str = "Missing Values Summary") -> None:
+    _log_missing_values_summary(logger_obj, missing_dict, title)
 
-        Returns:
-            Configured logging.Logger instance
-        """
-        return self.logger
 
-    def log_missing_values_summary(
-        self, missing_dict: dict, title: str = "Missing Values Summary"
-    ) -> None:
-        """
-        Log a pretty formatted summary of missing values as a DataFrame.
 
-        Args:
-            missing_dict: Dictionary with column names as keys and missing value ratios as values
-            title: Title for the summary table
-        """
-        if not missing_dict:
-            self.logger.info(f"{title}: No missing values to report")
-            return
+def _log_dataframe(self, df, title: str = None) -> None:
+    """Custom method to log a pandas DataFrame nicely."""
+    if df is None or df.empty:
+        self.info(f"{title}: Empty DataFrame")
+        return
 
-        # Create DataFrame for pretty display
-        summary_data = []
-        for col_name, missing_ratio in missing_dict.items():
-            summary_data.append(
-                {
-                    "Column": col_name,
-                    "Missing Count": int(missing_ratio * 100)
-                    if missing_ratio > 1
-                    else "N/A",
-                    "Missing %": f"{missing_ratio * 100:.2f}%",
-                }
-            )
+    if title:
+        self.info("=" * 60)
+        self.info(f"{title}")
+        self.info("-" * 60)
 
-        df_summary = pd.DataFrame(summary_data)
+    # Convert DataFrame to string with borders
+    df_str = df.to_string(index=False)
+    for line in df_str.split('\n'):
+        self.info(line)
 
-        # Log the title
-        self.logger.info("=" * 60)
-        self.logger.info(title)
-        self.logger.info("=" * 60)
+    if title:
+        self.info("=" * 60)
 
-        # Log each row of the DataFrame
-        for _, row in df_summary.iterrows():
-            self.logger.info(
-                f"  • {row['Column']:<25} Missing: {row['Missing %']:>8}"
-            )
+class PrintHandler(logging.Handler):
+    """
+    Custom handler that uses print() to output logs.
+    This often works better in Jupyter notebooks than writing directly to sys.stdout/stderr.
+    """
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            print(msg)
+        except Exception:
+            self.handleError(record)
 
-        self.logger.info("=" * 60)
