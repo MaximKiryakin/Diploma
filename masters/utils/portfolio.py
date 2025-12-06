@@ -1,4 +1,11 @@
-from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate, get_cbr_inflation_data
+from utils.load_data import (
+    load_stock_data,
+    load_multipliers,
+    get_rubusd_exchange_rate,
+    get_cbr_inflation_data,
+    load_pickle_object,
+    update_pickle_object
+)
 from utils.logger import Logger
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 import pickle
@@ -83,8 +90,8 @@ class Portfolio:
 
         Args:
             tickers_list (list[str], optional): List of tickers. If not specified, uses the default tickers list.
-            use_backup_data (bool, optional): If True, loads stock data from backup file. Defaults to False.
-            update_backup (bool, optional): If True, updates the backup file with new data. Defaults to False.
+            use_backup_data (bool, optional): If True, loads stock data from backup file only. Defaults to True.
+            update_backup (bool, optional): If True, downloads new data and updates backup. Defaults to False.
             backup_path (str, optional): Path to the backup file. Defaults to "data/backup/stocks.pkl".
 
         Returns:
@@ -92,97 +99,114 @@ class Portfolio:
         """
 
         target_tickers = self.tickers_list if tickers_list is None else tickers_list
-        existing_data = None
-        download_start_date = self.dt_start
+        calc_date = pd.to_datetime(self.dt_calc)
 
-        # 1. Try to load from backup
-        if use_backup_data and os.path.isfile(backup_path):
-            try:
-                with open(backup_path, "rb") as f:
-                    existing_data = pickle.load(f)
+        if use_backup_data and not update_backup:
 
-                if existing_data is not None and not existing_data.empty and '<DATE>' in existing_data.columns:
-                    # Find the last date in backup
-                    existing_data['temp_date'] = pd.to_datetime(existing_data['<DATE>'], format='%Y%m%d')
-                    last_date = existing_data['temp_date'].max()
-                    existing_data = existing_data.drop(columns=['temp_date'])
+            if not os.path.isfile(backup_path):
+                log.error(f"Backup file not found at {backup_path}")
+                return self
 
-                    log.info(f"Backup loaded. Last date: {last_date.date()}")
+            data = load_pickle_object(backup_path)
 
-                    calc_date = pd.to_datetime(self.dt_calc)
-                    if last_date < calc_date:
-                        download_start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
-                        log.info(f"Need to update data from {download_start_date} to {self.dt_calc}")
-                    else:
-                        log.info("Backup is up to date.")
-                        download_start_date = None # No need to download
+            if data is not None and not data.empty:
+
+                max_date = pd.to_datetime(data['<DATE>'], format='%Y%m%d').max()
+                data = data[pd.to_datetime(data['<DATE>'], format='%Y%m%d') <= calc_date]
+
+                if max_date < calc_date:
+                    days_gap = (calc_date - max_date).days
+                    log.warning(
+                        f"Backup data incomplete: ends on {max_date.date()}, but calculation "
+                        f"date is {self.dt_calc} ({days_gap} days gap). Using available data."
+                    )
                 else:
-                    log.warning("Backup file is empty or has invalid format. Will download from scratch.")
-                    existing_data = None
-            except Exception as e:
-                log.error(f"Error loading backup: {e}. Will download from scratch.")
-                existing_data = None
+                    log.info(f"Using backup data up to {max_date.date()}")
+            else:
+                log.error("Backup file is empty")
+                return self
 
-        # 2. Download new data if needed
-        new_data = None
-        if download_start_date:
-            # Check if start date is not in the future relative to calc date
-            if pd.to_datetime(download_start_date) <= pd.to_datetime(self.dt_calc):
-                try:
+        elif update_backup:
+            existing_data = None
+            if not os.path.isfile(backup_path):
+                log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
+                data = load_stock_data(
+                    tickers_list=target_tickers,
+                    start_date=self.dt_start,
+                    end_date=self.dt_calc,
+                    step=self.stocks_step,
+                )
+                update_pickle_object(backup_path, data)
+                log.info(f"Backup created: {backup_path}")
+
+            existing_data = load_pickle_object(backup_path)
+
+            if existing_data is not None and not existing_data.empty:
+
+                last_date = pd.to_datetime(existing_data['<DATE>'], format='%Y%m%d').max()
+                start_date = pd.to_datetime(self.dt_start)
+
+                if last_date >= calc_date:
+                    log.info(f"Backup is up to date: {last_date.date()}. No download needed.")
+                    data = existing_data
+                elif (last_date >= start_date) and (last_date < start_date):
+
+                    download_start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+                    log.info(f"Downloading new data from {download_start_date} to {self.dt_calc}")
+
                     new_data = load_stock_data(
                         tickers_list=target_tickers,
                         start_date=download_start_date,
                         end_date=self.dt_calc,
                         step=self.stocks_step,
                     )
-                    if new_data is not None:
-                        log.info(f"Downloaded {len(new_data)} new records.")
-                    else:
-                        log.info("No new data available for the requested period.")
-                except Exception as e:
-                    log.error(f"Failed to download stock data: {e}")
+
+                    data = pd.concat([existing_data, new_data]).drop_duplicates()
+                    log.info(f"Downloaded {len(new_data)} new records")
+                else:
+                    log.info(f"Backup older than start date. Downloading from {self.dt_start} to {self.dt_calc}")
+                    data = load_stock_data(
+                        tickers_list=target_tickers,
+                        start_date=self.dt_start,
+                        end_date=self.dt_calc,
+                        step=self.stocks_step,
+                    )
+                    backup_data = pd.concat([existing_data, data]).drop_duplicates()
+                    update_pickle_object(backup_path, backup_data)
+                    log.info(f"Backup updated: {backup_path}")
+
             else:
-                log.info("Download start date is after calculation date. Skipping download.")
-
-        # 3. Combine data
-        if existing_data is not None and new_data is not None:
-            self.d['stocks'] = pd.concat([existing_data, new_data]).drop_duplicates()
-            log.info("Merged backup and new data.")
-        elif existing_data is not None:
-            self.d['stocks'] = existing_data
-        elif new_data is not None:
-            self.d['stocks'] = new_data
-        else:
-            if self.d['stocks'] is None:
-                 log.warning("No stock data loaded!")
-
-        # 4. Update backup if requested
-        if update_backup and self.d['stocks'] is not None:
-            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-            with open(backup_path, "wb") as f:
-                pickle.dump(self.d['stocks'], f)
-            log.info(f"Backup updated: {backup_path}")
-
-        # 5. Process data (rename columns, etc.)
-        if self.d['stocks'] is not None:
-            self.d['stocks'] = (
-                self.d['stocks'].rename(
-                    columns={col: col[1:-1].lower() for col in self.d['stocks'].columns}
+                log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
+                data = load_stock_data(
+                    tickers_list=target_tickers,
+                    start_date=self.dt_start,
+                    end_date=self.dt_calc,
+                    step=self.stocks_step,
                 )
-                .assign(date=lambda x: pd.to_datetime(x["date"]))
-                .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
-                .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
-                .drop(columns=["per", "vol"])
+                update_pickle_object(backup_path, data)
+                log.info(f"Backup updated: {backup_path}")
+
+        data = (
+            data
+            .assign(date_col=lambda x: pd.to_datetime(x['<DATE>'], format='%Y%m%d'))
+            .query('date_col <= @calc_date')
+            .drop(columns=['date_col'])
+            .rename(
+                columns={col: col[1:-1].lower() for col in data.columns}
             )
+            .assign(date=lambda x: pd.to_datetime(x["date"]))
+            .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
+            .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
+            .drop(columns=["per", "vol"])
+        )
 
-            # Log loaded period
-            min_date = self.d['stocks']['date'].min().strftime('%Y-%m-%d')
-            max_date = self.d['stocks']['date'].max().strftime('%Y-%m-%d')
-            period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
-            log.log_dataframe(period_df, title="Loaded Stock Data Period")
+        min_date = data['date'].min().strftime('%Y-%m-%d')
+        max_date = data['date'].max().strftime('%Y-%m-%d')
+        period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
+        log.log_dataframe(period_df, title="Loaded Stock Data Period")
+        log.log_missing_values_summary(data, title="Stock Data Missing Values")
 
-            # Log missing values statistics
-            log.log_missing_values_summary(self.d['stocks'], title="Stock Data Missing Values")
+        self.d['stocks'] = data
 
         return self
 
@@ -212,46 +236,43 @@ class Portfolio:
 
         # 1. Try to load from backup
         if use_backup and os.path.isfile(backup_path):
-            try:
-                with open(backup_path, "rb") as f:
-                    multipliers_raw = pickle.load(f)
 
-                # Check max date in backup
-                period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
-                if period_cols:
-                    def parse_period(p):
-                        try:
-                            parts = p.split('_')
-                            return int(parts[0]), int(parts[1])
-                        except:
-                            return (0, 0)
+            with open(backup_path, "rb") as f:
+                multipliers_raw = pickle.load(f)
 
-                    max_period_str = max(period_cols, key=parse_period)
-                    max_y, max_q = parse_period(max_period_str)
+            # Check max date in backup
+            period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
+            if period_cols:
+                def parse_period(p):
+                    try:
+                        parts = p.split('_')
+                        return int(parts[0]), int(parts[1])
+                    except:
+                        return (0, 0)
 
-                    log.info(f"Backup loaded. Last period: {max_period_str}")
+                max_period_str = max(period_cols, key=parse_period)
+                max_y, max_q = parse_period(max_period_str)
 
-                    # Check against dt_calc
-                    calc_date = pd.to_datetime(self.dt_calc)
-                    calc_year = calc_date.year
-                    calc_quarter = (calc_date.month - 1) // 3 + 1
+                log.info(f"Backup loaded. Last period: {max_period_str}")
 
-                    if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
-                        is_backup_outdated = True
-                        if update_backup:
-                            log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Downloading fresh data...")
-                            multipliers_raw = None
-                        else:
-                            log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Using outdated backup. Set update_backup=True to download fresh data.")
+                # Check against dt_calc
+                calc_date = pd.to_datetime(self.dt_calc)
+                calc_year = calc_date.year
+                calc_quarter = (calc_date.month - 1) // 3 + 1
+
+                if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
+                    is_backup_outdated = True
+                    if update_backup:
+                        log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Downloading fresh data...")
+                        multipliers_raw = None
                     else:
-                        log.info("Backup is up to date.")
+                        log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Using outdated backup. Set update_backup=True to download fresh data.")
                 else:
-                    log.warning("Backup file has no period columns. Will download fresh data.")
-                    multipliers_raw = None
-
-            except Exception as e:
-                log.warning(f"Error loading multipliers backup: {e}. Will download fresh data.")
+                    log.info("Backup is up to date.")
+            else:
+                log.warning("Backup file has no period columns. Will download fresh data.")
                 multipliers_raw = None
+
 
         # 2. Download fresh data if needed
         if multipliers_raw is None:
@@ -378,8 +399,7 @@ class Portfolio:
 
         self.d['portfolio']["Долг, млрд руб"] = np.select(
             [
-                (self.d['portfolio']["Долг, млрд руб"].notna())
-                & (self.d['portfolio']["Долг, млрд руб"].ne(0)),
+                (self.d['portfolio']["Долг, млрд руб"].notna()) & (self.d['portfolio']["Долг, млрд руб"].ne(0)),
                 (self.d['portfolio']["Долг, млрд руб"].isna())
                 & (
                     (self.d['portfolio']["Чистый долг, млрд руб"].isna())
@@ -402,9 +422,10 @@ class Portfolio:
             self.d['portfolio']["Долг, млрд руб"],
         )
 
-        self.d['portfolio'] = self.d['portfolio'].rename(columns=columns_new_names).drop(
-            columns=["Чистый долг, млрд руб"]
-        )
+        self.d['portfolio'] = self.d['portfolio'].rename(columns=columns_new_names)
+        # .drop(
+        #     columns=["Чистый долг, млрд руб"]
+        # )
 
         adjusted_df = pd.DataFrame([{"Column": col} for col in column_to_adjust])
         log.log_dataframe(adjusted_df, title="Data Types Adjusted")
@@ -457,6 +478,7 @@ class Portfolio:
             self.d['portfolio'][col] /= 100
 
         log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
+        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
 
         return self
 
@@ -469,6 +491,10 @@ class Portfolio:
         Returns:
             Portfolio: Updated portfolio with missing values filled.
         """
+
+        log.log_missing_values_summary(
+            self.d['portfolio'], title="Portfolio Missing Values Before Filling"
+        )
 
         self.d['portfolio'] = self.d['portfolio'].sort_values(by=["ticker", "date"])
 
@@ -490,8 +516,7 @@ class Portfolio:
 
         # Log missing values summary using the logger's pretty print method
         log.log_missing_values_summary(
-            missing_dict=missing,
-            title="Missing Values Summary (Before Filling)"
+            self.d['portfolio'], title="Portfolio Missing Values After Filling"
         )
 
         log.info(f"Missing values filled in: {columns_to_fill}")
