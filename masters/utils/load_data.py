@@ -197,7 +197,7 @@ def load_stock_data(
     return total_df
 
 
-def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame:
+def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: bool = True) -> pd.DataFrame:
     """
     Loads financial multipliers for a given list of companies from CSV files.
 
@@ -207,6 +207,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
     Args:
         companies_list: List of company tickers (e.g., ['GAZP', 'SBER']). If None,
                        uses a default list of Russian blue-chip companies.
+        update_backup: If True, updates the local CSV backup files with downloaded data.
 
     Returns:
         pd.DataFrame: A DataFrame containing the selected financial multipliers
@@ -266,12 +267,13 @@ def load_multipliers(companies_list: Optional[List[str]] = None) -> pd.DataFrame
             # Check if content looks like CSV (not HTML error)
             if b"<!DOCTYPE html>" not in content[:100] and len(content) > 100:
                 # Save to backup
-                backup_path = f"data/multiplicators/{company}.csv"
-                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-                with open(backup_path, "wb") as f:
-                    f.write(content)
+                if update_backup:
+                    backup_path = f"data/multiplicators/{company}.csv"
+                    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                    with open(backup_path, "wb") as f:
+                        f.write(content)
 
-                log.info(f"Updated multipliers backup for {company}")
+                    log.info(f"Updated multipliers backup for {company}")
 
                 df = pd.read_csv(BytesIO(content), sep=';')
             else:

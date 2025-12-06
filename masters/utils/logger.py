@@ -3,6 +3,7 @@ import sys
 import os
 import types
 from typing import Optional
+import pandas as pd
 
 # Prevent matplotlib from spamming
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
@@ -13,16 +14,21 @@ FORMAT = "%(asctime)s:%(name)s:%(levelname)s: %(message)s"
 def _log_missing_values_summary(self, missing_dict: dict, title: str = "Missing Values Summary") -> None:
     """Custom method attached to logger instances."""
     if not missing_dict:
-        self.info(f"{title}: none")
+        self.info(f"{title}: No missing values found")
         return
 
-    self.info("=" * 60)
-    self.info(f"{title}")
-    self.info("-" * 60)
+    data = []
     for col, val in missing_dict.items():
-        val_str = f"{val:.2%}" if isinstance(val, float) and 0 <= val <= 1 else str(val)
-        self.info(f"{col:<30} | {val_str}")
-    self.info("=" * 60)
+        if val > 0:
+            val_str = f"{val:.2%}" if isinstance(val, float) and 0 <= val <= 1 else str(val)
+            data.append({"Column": col, "Value": val_str})
+
+    if not data:
+        self.info(f"{title}: No missing values found")
+        return
+
+    df = pd.DataFrame(data)
+    self.log_dataframe(df, title=title)
 
 def Logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[str] = None) -> logging.Logger:
     """

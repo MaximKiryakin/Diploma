@@ -74,8 +74,8 @@ class Portfolio:
     def load_stock_data(
         self,
         tickers_list: list[str] = None,
-        use_backup_data: bool = False,
-        create_backup: bool = False,
+        use_backup_data: bool = True,
+        update_backup: bool = False,
         backup_path: str = "data/backup/stocks.pkl",
     ) -> "Portfolio":
         """
@@ -84,7 +84,7 @@ class Portfolio:
         Args:
             tickers_list (list[str], optional): List of tickers. If not specified, uses the default tickers list.
             use_backup_data (bool, optional): If True, loads stock data from backup file. Defaults to False.
-            create_backup (bool, optional): If True, creates a backup file with the loaded stock data. Defaults to False.
+            update_backup (bool, optional): If True, updates the backup file with new data. Defaults to False.
             backup_path (str, optional): Path to the backup file. Defaults to "data/backup/stocks.pkl".
 
         Returns:
@@ -157,7 +157,7 @@ class Portfolio:
                  log.warning("No stock data loaded!")
 
         # 4. Update backup if requested
-        if create_backup and self.d['stocks'] is not None:
+        if update_backup and self.d['stocks'] is not None:
             os.makedirs(os.path.dirname(backup_path), exist_ok=True)
             with open(backup_path, "wb") as f:
                 pickle.dump(self.d['stocks'], f)
@@ -175,26 +175,131 @@ class Portfolio:
                 .drop(columns=["per", "vol"])
             )
 
+            # Log loaded period
+            min_date = self.d['stocks']['date'].min().strftime('%Y-%m-%d')
+            max_date = self.d['stocks']['date'].max().strftime('%Y-%m-%d')
+            period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
+            log.log_dataframe(period_df, title="Loaded Stock Data Period")
+
+            # Log missing values statistics
+            missing_stats = (self.d['stocks'].isna().sum() / len(self.d['stocks'])).to_dict()
+            log.log_missing_values_summary(missing_stats, title="Stock Data Missing Values")
+
         return self
 
-    def load_multipliers(self, tickers_list: list[str] = None):
+    def load_multipliers(
+        self,
+        tickers_list: list[str] = None,
+        use_backup: bool = True,
+        update_backup: bool = False,
+        backup_path: str = "data/backup/multipliers.pkl"
+    ) -> "Portfolio":
         """
         Loads multipliers data for the given tickers.
 
         Args:
             tickers_list (list[str], optional): List of tickers. If not specified, uses the default tickers list.
+            use_backup (bool, optional): If True, loads multipliers from backup file. Defaults to True.
+            update_backup (bool, optional): If True, updates the backup file with new data. Defaults to False.
+            backup_path (str, optional): Path to the backup file. Defaults to "data/backup/multipliers.pkl".
 
         Returns:
             Portfolio: Updated portfolio with loaded multipliers data.
         """
 
-        self.d['multipliers'] = load_multipliers(
-            companies_list=self.tickers_list if tickers_list is None else tickers_list,
-        )
+        target_tickers = self.tickers_list if tickers_list is None else tickers_list
+        multipliers_raw = None
+        is_backup_outdated = False
 
+        # 1. Try to load from backup
+        if use_backup and os.path.isfile(backup_path):
+            try:
+                with open(backup_path, "rb") as f:
+                    multipliers_raw = pickle.load(f)
+
+                # Check max date in backup
+                period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
+                if period_cols:
+                    def parse_period(p):
+                        try:
+                            parts = p.split('_')
+                            return int(parts[0]), int(parts[1])
+                        except:
+                            return (0, 0)
+
+                    max_period_str = max(period_cols, key=parse_period)
+                    max_y, max_q = parse_period(max_period_str)
+
+                    log.info(f"Backup loaded. Last period: {max_period_str}")
+
+                    # Check against dt_calc
+                    calc_date = pd.to_datetime(self.dt_calc)
+                    calc_year = calc_date.year
+                    calc_quarter = (calc_date.month - 1) // 3 + 1
+
+                    if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
+                        is_backup_outdated = True
+                        if update_backup:
+                            log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Downloading fresh data...")
+                            multipliers_raw = None
+                        else:
+                            log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Using outdated backup. Set update_backup=True to download fresh data.")
+                    else:
+                        log.info("Backup is up to date.")
+                else:
+                    log.warning("Backup file has no period columns. Will download fresh data.")
+                    multipliers_raw = None
+
+            except Exception as e:
+                log.warning(f"Error loading multipliers backup: {e}. Will download fresh data.")
+                multipliers_raw = None
+
+        # 2. Download fresh data if needed
+        if multipliers_raw is None:
+            try:
+                multipliers_raw = load_multipliers(
+                    companies_list=target_tickers,
+                    update_backup=update_backup
+                )
+                log.info(f"Downloaded fresh multipliers data")
+            except Exception as e:
+                log.error(f"Failed to download multipliers: {e}")
+                return self
+
+        # 3. Log period information from raw data BEFORE processing
+        period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
+        if period_cols:
+            def parse_period(p):
+                try:
+                    parts = p.split('_')
+                    return int(parts[0]), int(parts[1])
+                except:
+                    return (0, 0)
+
+            min_period_str = min(period_cols, key=parse_period)
+            max_period_str = max(period_cols, key=parse_period)
+
+            # Check if loaded data is newer than required
+            max_y, max_q = parse_period(max_period_str)
+            calc_date = pd.to_datetime(self.dt_calc)
+            calc_year = calc_date.year
+            calc_quarter = (calc_date.month - 1) // 3 + 1
+
+            if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
+                log.warning(f"Loaded multipliers data ends at {max_period_str}, but calculation date requires {calc_year}_{calc_quarter}. Using latest available data from Smart-Lab.")
+
+            period_df = pd.DataFrame([{"Start Period": min_period_str, "End Period": max_period_str}])
+            log.log_dataframe(period_df, title="Loaded Multipliers Data Period")        # 4. Update backup if requested
+        if update_backup and multipliers_raw is not None and (is_backup_outdated or not os.path.isfile(backup_path)):
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            with open(backup_path, "wb") as f:
+                pickle.dump(multipliers_raw, f)
+            log.info(f"Multipliers backup updated: {backup_path}")
+
+        # 5. Process data
         self.d['multipliers'] = (
             pd.melt(
-                self.d['multipliers'],
+                multipliers_raw,
                 id_vars=["company", "characteristic"],
                 var_name="year_quarter",
                 value_name="value",
@@ -209,7 +314,9 @@ class Portfolio:
             .rename(columns={"company": "ticker"})
         )
 
-        log.info("Multipliers data loaded | Features: %s", list(self.d['multipliers'].columns))
+        # 6. Log missing values statistics
+        missing_stats = (self.d['multipliers'].isna().sum() / len(self.d['multipliers'])).to_dict()
+        log.log_missing_values_summary(missing_stats, title="Multipliers Data Missing Values")
 
         return self
 
