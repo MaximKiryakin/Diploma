@@ -11,8 +11,14 @@ logging.getLogger("matplotlib").setLevel(logging.ERROR)
 DEFAULT_LOG_FILE = os.path.join("logs", "app.log")
 FORMAT = "%(asctime)s:%(name)s:%(levelname)s: %(message)s"
 
-def _log_missing_values_summary(self, missing_dict: dict, title: str = "Missing Values Summary") -> None:
-    """Custom method attached to logger instances."""
+def _log_missing_values_summary(self, dataframe_or_dict, title: str = "Missing Values Summary") -> None:
+    """Custom method attached to logger instances. Accepts either a DataFrame or a pre-calculated dict."""
+    # If it's a DataFrame, calculate missing values
+    if isinstance(dataframe_or_dict, pd.DataFrame):
+        missing_dict = (dataframe_or_dict.isna().sum() / len(dataframe_or_dict)).to_dict()
+    else:
+        missing_dict = dataframe_or_dict
+
     if not missing_dict:
         self.info(f"{title}: No missing values found")
         return

@@ -1,4 +1,4 @@
-from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate
+from utils.load_data import load_stock_data, load_multipliers, get_rubusd_exchange_rate, get_cbr_inflation_data
 from utils.logger import Logger
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 import pickle
@@ -182,8 +182,7 @@ class Portfolio:
             log.log_dataframe(period_df, title="Loaded Stock Data Period")
 
             # Log missing values statistics
-            missing_stats = (self.d['stocks'].isna().sum() / len(self.d['stocks'])).to_dict()
-            log.log_missing_values_summary(missing_stats, title="Stock Data Missing Values")
+            log.log_missing_values_summary(self.d['stocks'], title="Stock Data Missing Values")
 
         return self
 
@@ -315,8 +314,7 @@ class Portfolio:
         )
 
         # 6. Log missing values statistics
-        missing_stats = (self.d['multipliers'].isna().sum() / len(self.d['multipliers'])).to_dict()
-        log.log_missing_values_summary(missing_stats, title="Multipliers Data Missing Values")
+        log.log_missing_values_summary(self.d['multipliers'], title="Multipliers Data Missing Values")
 
         return self
 
@@ -332,7 +330,15 @@ class Portfolio:
             self.d['multipliers'], on=["ticker", "year", "quarter"], how="left"
         )
 
-        log.info("Portfolio created | Companies: %d", len(self.d['portfolio'].ticker.unique()))
+        num_rows = len(self.d['portfolio'])
+        portfolio_info = pd.DataFrame([{
+            "Total Rows": num_rows,
+            "Unique Companies": len(self.d['portfolio'].ticker.unique()),
+            "Date Range": f"{self.d['portfolio']['date'].min().strftime('%Y-%m-%d')} to {self.d['portfolio']['date'].max().strftime('%Y-%m-%d')}"
+        }])
+        log.log_dataframe(portfolio_info, title="Portfolio Dimensions")
+
+        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
 
         return self
 
@@ -400,21 +406,31 @@ class Portfolio:
             columns=["Чистый долг, млрд руб"]
         )
 
-        log.info("Column types adjusted: %s", column_to_adjust)
+        adjusted_df = pd.DataFrame([{"Column": col} for col in column_to_adjust])
+        log.log_dataframe(adjusted_df, title="Data Types Adjusted")
 
         return self
 
-    def add_macro_data(self):
+    def add_macro_data(self, update_inflation: bool = False):
         """
         Adds macroeconomic data to the portfolio data.
+
+        Args:
+            update_inflation (bool): If True, downloads fresh inflation data from CBR. Defaults to False.
 
         Returns:
             Portfolio: Updated portfolio with added macroeconomic data.
         """
 
-        # TODO create special loader for data
         unemployment = pd.read_excel("data/macro/unemployment.xlsx")
-        inflation = pd.read_excel("data/macro/inflation.xlsx")
+
+        # Load or download inflation data
+        inflation_path = "data/macro/inflation.xlsx"
+        if update_inflation or not os.path.isfile(inflation_path):
+            inflation = get_cbr_inflation_data(inflation_path, self.dt_start, self.dt_calc)
+        else:
+            inflation = pd.read_excel(inflation_path)
+
         rub_usd = get_rubusd_exchange_rate(
             dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=True
         )
@@ -443,6 +459,8 @@ class Portfolio:
         log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
 
         return self
+
+
 
     def fill_missing_values(self):
         """

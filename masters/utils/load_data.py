@@ -438,3 +438,66 @@ def get_rubusd_exchange_rate(
         )
 
     return rates
+
+
+def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str) -> pd.DataFrame:
+    """
+    Downloads inflation data from CBR (Central Bank of Russia).
+
+    Args:
+        output_path (str): Path to save the inflation data.
+        dt_start (str): Start date in format 'YYYY-MM-DD'.
+        dt_calc (str): End date in format 'YYYY-MM-DD'.
+
+    Returns:
+        pd.DataFrame: Inflation data with columns 'Дата', 'Ключевая ставка, % годовых', 'Инфляция, % г/г', 'Цель по инфляции'
+    """
+    import urllib.request
+
+    start_date = datetime.strptime(dt_start, '%Y-%m-%d')
+    end_date = datetime.strptime(dt_calc, '%Y-%m-%d')
+
+    start_str = start_date.strftime('%m%%2F%d%%2F%Y')
+    end_str = end_date.strftime('%m%%2F%d%%2F%Y')
+    url = f"https://www.cbr.ru/Queries/UniDbQuery/DownloadExcel/132934?FromDate={start_str}&ToDate={end_str}&posted=False"
+
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    req = urllib.request.Request(url, headers=headers)
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                excel_data = BytesIO(response.read())
+            break
+        except Exception as e:
+            if attempt == 2:
+                log.error(f"Failed to download inflation data: {e}")
+                if os.path.exists(output_path):
+                    return pd.read_excel(output_path)
+                return pd.DataFrame({
+                    'Дата': pd.Series(dtype='datetime64[ns]'),
+                    'Ключевая ставка, % годовых': pd.Series(dtype='float64'),
+                    'Инфляция, % г/г': pd.Series(dtype='float64'),
+                    'Цель по инфляции': pd.Series(dtype='float64')
+                })
+            time.sleep(2)
+
+    df = pd.read_excel(excel_data, dtype=str)
+    df.columns = df.columns.str.strip()
+
+    date_col = next((col for col in df.columns if 'Дата' in col or 'дата' in col.lower()), None)
+    if date_col:
+        df = df.rename(columns={date_col: 'Дата'})
+
+    df['Дата'] = pd.to_datetime(df['Дата'], format='%m.%Y', errors='coerce')
+    df = df[df['Дата'].notna()]
+
+    for col in ['Ключевая ставка, % годовых', 'Инфляция, % г/г', 'Цель по инфляции']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df.to_excel(output_path, index=False)
+
+    log.info(f"Inflation data saved: {len(df)} records to {output_path}")
+    return df
