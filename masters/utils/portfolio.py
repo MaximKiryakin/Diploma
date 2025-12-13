@@ -174,7 +174,6 @@ class Portfolio:
                     backup_data = pd.concat([existing_data, data]).drop_duplicates()
                     update_pickle_object(backup_path, backup_data)
                     log.info(f"Backup updated: {backup_path}")
-
             else:
                 log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
                 data = load_stock_data(
@@ -231,110 +230,79 @@ class Portfolio:
         """
 
         target_tickers = self.tickers_list if tickers_list is None else tickers_list
-        multipliers_raw = None
-        is_backup_outdated = False
+        multipliers_df = None
+        calc_date = pd.to_datetime(self.dt_calc)
 
-        # 1. Try to load from backup
         if use_backup and os.path.isfile(backup_path):
 
-            with open(backup_path, "rb") as f:
-                multipliers_raw = pickle.load(f)
+            multipliers_df = load_pickle_object(backup_path)
 
-            # Check max date in backup
-            period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
-            if period_cols:
-                def parse_period(p):
-                    try:
-                        parts = p.split('_')
-                        return int(parts[0]), int(parts[1])
-                    except:
-                        return (0, 0)
+            max_date = pd.to_datetime(multipliers_df["date"]).max()
+            log.info(f"Backup loaded. Last date: {max_date.strftime('%Y-%m-%d')}")
 
-                max_period_str = max(period_cols, key=parse_period)
-                max_y, max_q = parse_period(max_period_str)
-
-                log.info(f"Backup loaded. Last period: {max_period_str}")
-
-                # Check against dt_calc
-                calc_date = pd.to_datetime(self.dt_calc)
-                calc_year = calc_date.year
-                calc_quarter = (calc_date.month - 1) // 3 + 1
-
-                if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
-                    is_backup_outdated = True
-                    if update_backup:
-                        log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Downloading fresh data...")
-                        multipliers_raw = None
-                    else:
-                        log.warning(f"Backup data outdated. Backup last period: {max_period_str}, Required: {calc_year}_{calc_quarter}. Using outdated backup. Set update_backup=True to download fresh data.")
+            if max_date < calc_date:
+                if update_backup:
+                    log.warning(f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, Required: {calc_date.strftime('%Y-%m-%d')}). Downloading fresh data...")
+                    multipliers_df = None
                 else:
-                    log.info("Backup is up to date.")
+                    log.warning(f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, Required: {calc_date.strftime('%Y-%m-%d')}). Using outdated backup.")
             else:
-                log.warning("Backup file has no period columns. Will download fresh data.")
-                multipliers_raw = None
+                log.info("Backup is up to date.")
 
+        if multipliers_df is None:
 
-        # 2. Download fresh data if needed
-        if multipliers_raw is None:
-            try:
-                multipliers_raw = load_multipliers(
-                    companies_list=target_tickers,
-                    update_backup=update_backup
+            multipliers_raw = load_multipliers(
+                companies_list=target_tickers,
+                update_backup=False
+            )
+            log.info("Downloaded fresh multipliers data")
+
+            multipliers_df = (
+                pd.melt(
+                    multipliers_raw,
+                    id_vars=["company", "characteristic"],
+                    var_name="year_quarter",
+                    value_name="value",
                 )
-                log.info(f"Downloaded fresh multipliers data")
-            except Exception as e:
-                log.error(f"Failed to download multipliers: {e}")
-                return self
+                .assign(
+                    temp_year=lambda x: x["year_quarter"].str.split("_", expand=True)[0].astype(int),
+                    temp_quarter=lambda x: x["year_quarter"].str.split("_", expand=True)[1].astype(int),
+                )
+                .assign(
+                    date=lambda x: pd.to_datetime(
+                        x["temp_year"].astype(str) + "-" + (x["temp_quarter"] * 3).astype(str) + "-01"
+                    )
+                    + pd.offsets.QuarterEnd(0)
+                )
+                .assign(
+                    year=lambda x: x["date"].dt.year,
+                    quarter=lambda x: x["date"].dt.quarter
+                )
+                .drop(columns=["year_quarter", "temp_year", "temp_quarter"])
+                .set_index(["company", "date", "year", "quarter", "characteristic"])["value"]
+                .unstack()
+                .reset_index()
+                .rename(columns={"company": "ticker"})
+            )
 
-        # 3. Log period information from raw data BEFORE processing
-        period_cols = [col for col in multipliers_raw.columns if col not in ['company', 'characteristic']]
-        if period_cols:
-            def parse_period(p):
-                try:
-                    parts = p.split('_')
-                    return int(parts[0]), int(parts[1])
-                except:
-                    return (0, 0)
-
-            min_period_str = min(period_cols, key=parse_period)
-            max_period_str = max(period_cols, key=parse_period)
-
-            # Check if loaded data is newer than required
-            max_y, max_q = parse_period(max_period_str)
-            calc_date = pd.to_datetime(self.dt_calc)
-            calc_year = calc_date.year
-            calc_quarter = (calc_date.month - 1) // 3 + 1
-
-            if (max_y < calc_year) or (max_y == calc_year and max_q < calc_quarter):
-                log.warning(f"Loaded multipliers data ends at {max_period_str}, but calculation date requires {calc_year}_{calc_quarter}. Using latest available data from Smart-Lab.")
-
-            period_df = pd.DataFrame([{"Start Period": min_period_str, "End Period": max_period_str}])
-            log.log_dataframe(period_df, title="Loaded Multipliers Data Period")        # 4. Update backup if requested
-        if update_backup and multipliers_raw is not None and (is_backup_outdated or not os.path.isfile(backup_path)):
             os.makedirs(os.path.dirname(backup_path), exist_ok=True)
             with open(backup_path, "wb") as f:
-                pickle.dump(multipliers_raw, f)
+                pickle.dump(multipliers_df, f)
             log.info(f"Multipliers backup updated: {backup_path}")
 
-        # 5. Process data
-        self.d['multipliers'] = (
-            pd.melt(
-                multipliers_raw,
-                id_vars=["company", "characteristic"],
-                var_name="year_quarter",
-                value_name="value",
-            )
-            .assign(year=lambda x: x["year_quarter"].str.split("_", expand=True)[0])
-            .assign(quarter=lambda x: x["year_quarter"].str.split("_", expand=True)[1])
-            .drop("year_quarter", axis=1)
-            .astype({"year": int, "quarter": int})
-            .set_index(["company", "year", "quarter", "characteristic"])["value"]
-            .unstack()
-            .reset_index()
-            .rename(columns={"company": "ticker"})
-        )
+        if multipliers_df is not None and not multipliers_df.empty:
 
-        # 6. Log missing values statistics
+            min_date = multipliers_df["date"].min().strftime('%Y-%m-%d')
+            max_date = multipliers_df["date"].max().strftime('%Y-%m-%d')
+            calc_date_str = calc_date.strftime('%Y-%m-%d')
+
+            period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
+            log.log_dataframe(period_df, title="Loaded Multipliers Data Period")
+
+            if max_date < calc_date_str:
+                log.warning(f"Loaded multipliers data ends at {max_date}, but calculation date requires {calc_date_str}.")
+
+        self.d['multipliers'] = multipliers_df
         log.log_missing_values_summary(self.d['multipliers'], title="Multipliers Data Missing Values")
 
         return self
