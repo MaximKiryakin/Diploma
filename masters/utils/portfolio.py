@@ -307,65 +307,157 @@ class Portfolio:
 
         return self
 
+    def load_macro_data(
+        self,
+        update_inflation: bool = False,
+        update_rub_usd: bool = False,
+        inflation_path: str = "data/macro/inflation.xlsx",
+        rub_usd_backup_path: str = "data/backup/rub_usd.pkl",
+        unemployment_path: str = "data/macro/unemployment.xlsx",
+    ) -> "Portfolio":
+        """
+        Adds macroeconomic data to the portfolio data.
+
+        Args:
+            update_inflation (bool): If True, downloads fresh inflation data from CBR and updates backup. Defaults to False.
+            update_rub_usd (bool): If True, downloads fresh USD/RUB exchange rate data. Defaults to False.
+            inflation_path (str): Path to inflation data file. Defaults to "data/macro/inflation.xlsx".
+            rub_usd_backup_path (str): Path to USD/RUB exchange rate backup. Defaults to "data/backup/rub_usd.pkl".
+
+        Returns:
+            Portfolio: Updated portfolio with added macroeconomic data.
+        """
+
+        # 1. Load and process Unemployment
+        # unemployment = pd.read_excel("data/macro/unemployment.xlsx")
+        # unemployment = unemployment.rename(columns={"Unemployment": "unemployment_rate"})
+        # unemployment["unemployment_rate"] /= 100
+        # self.d['macro_unemployment'] = unemployment
+
+        # TODO: сделать тут загрузку из инета
+        self.d['macro_unemployment'] = (
+            pd.read_excel(unemployment_path)
+            .rename(columns={"Unemployment": "unemployment_rate"})
+            .assign(unemployment_rate = lambda x: x.unemployment_rate / 100)
+            .rename(columns={"Year": "year"})
+        )
+
+        calc_date = pd.to_datetime(self.dt_calc)
+
+        # 2. Load and process Inflation & Interest Rate
+        if update_inflation or not os.path.isfile(inflation_path):
+            inflation = get_cbr_inflation_data(
+                inflation_path,
+                self.dt_start,
+                self.dt_calc,
+                update_backup=update_inflation
+            )
+            if update_inflation:
+                log.info("Downloaded fresh inflation data and updated backup")
+            else:
+                log.info("Downloaded fresh inflation data")
+        else:
+            inflation = pd.read_excel(inflation_path)
+            max_inflation_date = pd.to_datetime(inflation["Дата"]).max()
+            log.info(f"Loaded inflation data from backup. Last date: {max_inflation_date.strftime('%Y-%m-%d')}")
+
+        self.d['macro_inflation'] = (
+            inflation
+            .assign(dtReportLast=lambda x: pd.to_datetime(x["Дата"]) + pd.offsets.MonthEnd(0))
+            .rename(
+                columns={
+                    "Ключевая ставка, % годовых": "interest_rate",
+                    "Инфляция, % г/г": "inflation",
+                }
+            )
+            .assign(
+                interest_rate=lambda x: x["interest_rate"] / 100,
+                inflation=lambda x: x["inflation"] / 100
+            )
+            [["dtReportLast", "interest_rate", "inflation"]]
+        )
+
+        # 3. Load and process USD/RUB Exchange Rate
+        rub_usd_path = "data/macro/rubusd.csv"
+
+        if update_rub_usd or not os.path.isfile(rub_usd_path):
+            rub_usd = get_rubusd_exchange_rate(
+                dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=update_rub_usd
+            )
+            if update_rub_usd:
+                log.info("Downloaded fresh USD/RUB exchange rate and updated backup")
+            else:
+                log.info("Downloaded fresh USD/RUB exchange rate")
+        else:
+            rub_usd = pd.read_csv(rub_usd_path)
+            max_rub_usd_date = pd.to_datetime(rub_usd["date"]).max()
+            log.info(f"Loaded USD/RUB exchange rate from backup. Last date: {max_rub_usd_date.strftime('%Y-%m-%d')}")
+
+        self.d['macro_rub_usd'] = (
+            rub_usd
+            .assign(date=lambda x: pd.to_datetime(x["date"]))
+            #.rename(columns={"rubusd_exchange_rate": "usd_rub"})
+            [["date", "rubusd_exchange_rate"]]
+        )
+
+        # 4. Merge into Portfolio
+        # self.d['portfolio'] = (
+        #     self.d['portfolio']
+        #     .merge(self.d['macro_inflation'], on="date", how="left")
+        #     .merge(self.d['macro_unemployment'], left_on="year", right_on="Year", how="left")
+        #     .merge(self.d['macro_rub_usd'], on="date", how="left")
+        # )
+
+        # log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
+        # log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
+
+        return self
+
+
     def create_portfolio(self):
         """
-        Creates a portfolio by merging stocks and multipliers data.
+        Creates a portfolio by merging stocks, multipliers, and macro data.
 
         Returns:
             Portfolio: Created portfolio.
         """
 
-        self.d['portfolio'] = self.d['stocks'].merge(
-            self.d['multipliers'], on=["ticker", "year", "quarter"], how="left"
+        # 1. Start with stocks
+        self.d['portfolio'] = self.d['stocks'].copy()
+
+        self.d['portfolio'] = (
+            self.d['portfolio']
+            .assign(dtReportLast=lambda x: x["date"] + pd.offsets.MonthEnd(0))
+            .merge(
+                self.d['multipliers'].drop(columns=['date']), on=["ticker", "year", "quarter"], how="left"
+            )
+            .merge(self.d['macro_inflation'], on="dtReportLast", how="left")
+            .merge(self.d['macro_unemployment'], on="year", how="left")
+            .merge(self.d['macro_rub_usd'], on="date", how="left")
+            .drop(columns=["EV/EBITDA", "P/BV", "P/S", "Долг/EBITDA", "P/FCF", "time"])
         )
 
-        num_rows = len(self.d['portfolio'])
-        portfolio_info = pd.DataFrame([{
-            "Total Rows": num_rows,
-            "Unique Companies": len(self.d['portfolio'].ticker.unique()),
-            "Date Range": f"{self.d['portfolio']['date'].min().strftime('%Y-%m-%d')} to {self.d['portfolio']['date'].max().strftime('%Y-%m-%d')}"
-        }])
-        log.log_dataframe(portfolio_info, title="Portfolio Dimensions")
-
-        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
-
-        return self
-
-    def adjust_portfolio_data_types(self):
-        """
-        Adjusts the data types of the portfolio data.
-
-        Returns:
-            Portfolio: Updated portfolio with adjusted data types.
-        """
-
+        # Adjust data types
         columns_new_names = {
-            "Долг, млрд руб": "debt",
             "Капитализация, млрд руб": "capitalization",
         }
 
         column_to_adjust = [
-            "Долг, млрд руб",
-            "Капитализация, млрд руб",
-            "Чистый долг, млрд руб",
-            "high",
-            "low",
-            "close",
-            "EV/EBITDA",
-            "P/BV",
-            "P/E",
-            "P/S",
-            "open",
-            "Долг/EBITDA",
+            "Долг, млрд руб", "Капитализация, млрд руб",
+            "P/E", "open","high", "close",
+            "Чистый долг, млрд руб", "low"
         ]
 
         for col in column_to_adjust:
-            self.d['portfolio'][col] = self.d['portfolio'][col].str.replace(" ", "", regex=False)
-            self.d['portfolio'][col] = pd.to_numeric(self.d['portfolio'][col], errors="coerce")
-            if "млрд руб" in col:
-                self.d['portfolio'][col] *= 1e9
+            if col in self.d['portfolio'].columns:
+                if self.d['portfolio'][col].dtype == 'object':
+                    self.d['portfolio'][col] = self.d['portfolio'][col].str.replace(" ", "", regex=False)
+                self.d['portfolio'][col] = pd.to_numeric(self.d['portfolio'][col], errors="coerce")
+                if "млрд руб" in col:
+                    self.d['portfolio'][col] *= 1e9
 
-        self.d['portfolio']["Долг, млрд руб"] = np.select(
+        # selfulate Debt logic
+        self.d['portfolio']["debt"] = np.select(
             [
                 (self.d['portfolio']["Долг, млрд руб"].notna()) & (self.d['portfolio']["Долг, млрд руб"].ne(0)),
                 (self.d['portfolio']["Долг, млрд руб"].isna())
@@ -384,110 +476,29 @@ class Portfolio:
             ],
         )
 
-        self.d['portfolio']["Долг, млрд руб"] = np.where(
-            self.d['portfolio']["Долг, млрд руб"] < 0,
-            np.abs(self.d['portfolio']["Долг, млрд руб"]),
-            self.d['portfolio']["Долг, млрд руб"],
-        )
-
-        self.d['portfolio'] = self.d['portfolio'].rename(columns=columns_new_names)
-        # .drop(
-        #     columns=["Чистый долг, млрд руб"]
-        # )
-
-        adjusted_df = pd.DataFrame([{"Column": col} for col in column_to_adjust])
-        log.log_dataframe(adjusted_df, title="Data Types Adjusted")
-
-        return self
-
-    def add_macro_data(self, update_inflation: bool = False):
-        """
-        Adds macroeconomic data to the portfolio data.
-
-        Args:
-            update_inflation (bool): If True, downloads fresh inflation data from CBR. Defaults to False.
-
-        Returns:
-            Portfolio: Updated portfolio with added macroeconomic data.
-        """
-
-        unemployment = pd.read_excel("data/macro/unemployment.xlsx")
-
-        # Load or download inflation data
-        inflation_path = "data/macro/inflation.xlsx"
-        if update_inflation or not os.path.isfile(inflation_path):
-            inflation = get_cbr_inflation_data(inflation_path, self.dt_start, self.dt_calc)
-        else:
-            inflation = pd.read_excel(inflation_path)
-
-        rub_usd = get_rubusd_exchange_rate(
-            dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=True
-        )
-        inflation["date"] = pd.to_datetime(inflation["Дата"])
-        rub_usd["date"] = pd.to_datetime(rub_usd["date"])
+        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values Before Filling")
 
         self.d['portfolio'] = (
-            self.d['portfolio'].merge(inflation, on="date", how="left")
-            .merge(unemployment, left_on="year", right_on="Year", how="left")
-            .merge(rub_usd, on="date", how="left")
-            .drop(columns=["Дата", "Цель по инфляции"])
+            self.d['portfolio']
+            .assign(debt=lambda x: np.abs(x["debt"]))
+            .assign(debt=lambda x: x.groupby("ticker")["debt"].transform(lambda g: g.ffill().bfill()))
+            .assign(debt=lambda x: x["debt"].fillna(0))
+            .assign(inflation=lambda x: x["inflation"].ffill().bfill())
+            .assign(unemployment_rate=lambda x: x["inflation"].ffill().bfill())
+            .rename(columns=columns_new_names)
+            .assign(capitalization=lambda x: x.groupby("ticker")["capitalization"].transform(lambda g: g.ffill().bfill()))
+            .assign(capitalization=lambda x: x["capitalization"].fillna(0))
         )
 
-        self.d['portfolio'] = self.d['portfolio'].rename(
-            columns={
-                "Ключевая ставка, % годовых": "interest_rate",
-                "Инфляция, % г/г": "inflation",
-                "Unemployment": "unemployment_rate",
-                "curs": "usd_rub",
-            }
-        )
+        num_rows = len(self.d['portfolio'])
+        portfolio_info = pd.DataFrame([{
+            "Total Rows": num_rows,
+            "Unique Companies": len(self.d['portfolio'].ticker.unique()),
+            "Date Range": f"{self.d['portfolio']['date'].min().strftime('%Y-%m-%d')} to {self.d['portfolio']['date'].max().strftime('%Y-%m-%d')}"
+        }])
+        log.log_dataframe(portfolio_info, title="Portfolio Dimensions")
 
-        for col in ["inflation", "interest_rate", "unemployment_rate"]:
-            self.d['portfolio'][col] /= 100
-
-        log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
-        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
-
-        return self
-
-
-
-    def fill_missing_values(self):
-        """
-        Fills missing values in the portfolio data.
-
-        Returns:
-            Portfolio: Updated portfolio with missing values filled.
-        """
-
-        log.log_missing_values_summary(
-            self.d['portfolio'], title="Portfolio Missing Values Before Filling"
-        )
-
-        self.d['portfolio'] = self.d['portfolio'].sort_values(by=["ticker", "date"])
-
-        missing = {}
-        columns_to_fill = [
-            "debt",
-            "capitalization",
-            "rubusd_exchange_rate",
-            "inflation",
-            "interest_rate",
-            "unemployment_rate",
-        ]
-        for col in columns_to_fill:
-
-            missing[col] = self.d['portfolio'][col].isna().sum() / self.d['portfolio'].shape[0]
-            self.d['portfolio'][col] = self.d['portfolio'].groupby("ticker")[col].transform(
-                lambda x: x.ffill().bfill()
-            )
-
-        # Log missing values summary using the logger's pretty print method
-        log.log_missing_values_summary(
-            self.d['portfolio'], title="Portfolio Missing Values After Filling"
-        )
-
-        log.info(f"Missing values filled in: {columns_to_fill}")
+        log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values After Filling")
 
         return self
 
