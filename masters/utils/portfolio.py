@@ -126,63 +126,15 @@ class Portfolio:
             else:
                 log.error("Backup file is empty")
                 return self
-
-        elif update_backup:
-            existing_data = None
-            if not os.path.isfile(backup_path):
-                log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
-                data = load_stock_data(
-                    tickers_list=target_tickers,
-                    start_date=self.dt_start,
-                    end_date=self.dt_calc,
-                    step=self.stocks_step,
-                )
-                update_pickle_object(backup_path, data)
-                log.info(f"Backup created: {backup_path}")
-
-            existing_data = load_pickle_object(backup_path)
-
-            if existing_data is not None and not existing_data.empty:
-
-                last_date = pd.to_datetime(existing_data['<DATE>'], format='%Y%m%d').max()
-                start_date = pd.to_datetime(self.dt_start)
-
-                if last_date >= calc_date:
-                    log.info(f"Backup is up to date: {last_date.date()}. No download needed.")
-                    data = existing_data
-                elif (last_date >= start_date) and (last_date < start_date):
-
-                    download_start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
-                    log.info(f"Downloading new data from {download_start_date} to {self.dt_calc}")
-
-                    new_data = load_stock_data(
-                        tickers_list=target_tickers,
-                        start_date=download_start_date,
-                        end_date=self.dt_calc,
-                        step=self.stocks_step,
-                    )
-
-                    data = pd.concat([existing_data, new_data]).drop_duplicates()
-                    log.info(f"Downloaded {len(new_data)} new records")
-                else:
-                    log.info(f"Backup older than start date. Downloading from {self.dt_start} to {self.dt_calc}")
-                    data = load_stock_data(
-                        tickers_list=target_tickers,
-                        start_date=self.dt_start,
-                        end_date=self.dt_calc,
-                        step=self.stocks_step,
-                    )
-                    backup_data = pd.concat([existing_data, data]).drop_duplicates()
-                    update_pickle_object(backup_path, backup_data)
-                    log.info(f"Backup updated: {backup_path}")
-            else:
-                log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
-                data = load_stock_data(
-                    tickers_list=target_tickers,
-                    start_date=self.dt_start,
-                    end_date=self.dt_calc,
-                    step=self.stocks_step,
-                )
+        else:
+            log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
+            data = load_stock_data(
+                tickers_list=target_tickers,
+                start_date=self.dt_start,
+                end_date=self.dt_calc,
+                step=self.stocks_step,
+            )
+            if update_backup:
                 update_pickle_object(backup_path, data)
                 log.info(f"Backup updated: {backup_path}")
 
@@ -308,6 +260,18 @@ class Portfolio:
 
         return self
 
+    def _log_data_period(self, df: pd.DataFrame, date_col: str, title: str):
+        """
+        Helper method to log the start and end dates of a dataframe.
+        """
+        if df is not None and not df.empty and date_col in df.columns:
+            min_date = pd.to_datetime(df[date_col]).min().strftime('%Y-%m-%d')
+            max_date = pd.to_datetime(df[date_col]).max().strftime('%Y-%m-%d')
+            period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
+            log.log_dataframe(period_df, title=title)
+        else:
+            log.warning(f"Could not log period for {title}: DataFrame is empty or missing '{date_col}' column.")
+
     def load_macro_data(
         self,
         update_inflation: bool = False,
@@ -337,7 +301,12 @@ class Portfolio:
             .rename(columns={"Year": "year"})
         )
 
-        calc_date = pd.to_datetime(self.dt_calc)
+        # Log unemployment period (using 'year' as proxy for date range)
+        if not self.d['macro_unemployment'].empty:
+             min_year = self.d['macro_unemployment']['year'].min()
+             max_year = self.d['macro_unemployment']['year'].max()
+             period_df = pd.DataFrame([{"Start Year": min_year, "End Year": max_year}])
+             log.log_dataframe(period_df, title="Loaded Unemployment Data Period")
 
         # 2. Load and process Inflation & Interest Rate
         if update_inflation or not os.path.isfile(inflation_path):
@@ -372,6 +341,8 @@ class Portfolio:
             [["dtReportLast", "interest_rate", "inflation"]]
         )
 
+        self._log_data_period(self.d['macro_inflation'], "dtReportLast", "Loaded Inflation Data Period")
+
         # 3. Load and process USD/RUB Exchange Rate
         rub_usd_path = "data/macro/rubusd.csv"
 
@@ -391,20 +362,10 @@ class Portfolio:
         self.d['macro_rub_usd'] = (
             rub_usd
             .assign(date=lambda x: pd.to_datetime(x["date"]))
-            #.rename(columns={"rubusd_exchange_rate": "usd_rub"})
             [["date", "rubusd_exchange_rate"]]
         )
 
-        # 4. Merge into Portfolio
-        # self.d['portfolio'] = (
-        #     self.d['portfolio']
-        #     .merge(self.d['macro_inflation'], on="date", how="left")
-        #     .merge(self.d['macro_unemployment'], left_on="year", right_on="Year", how="left")
-        #     .merge(self.d['macro_rub_usd'], on="date", how="left")
-        # )
-
-        # log.info("Macro indicators added: Interest rate, Unemployment, Inflation, USD/RUB")
-        # log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values")
+        self._log_data_period(self.d['macro_rub_usd'], "date", "Loaded USD/RUB Exchange Rate Period")
 
         return self
 
@@ -776,7 +737,7 @@ class Portfolio:
         return self
 
     def plot_pd_by_tickers(
-        self, tickers: list, figsize: tuple = (10, 4), verbose: bool = False
+        self, tickers: list, figsize: tuple = (12, 5), verbose: bool = False
     ) -> "Portfolio":
         """
         Plots the probability of default (PD) for the given tickers.
@@ -795,7 +756,7 @@ class Portfolio:
     def calc_irf(
         self,
         impulses_responses: Dict[str, str] = None,
-        figsize: Tuple[int, int] = (10, 4),
+        figsize: Tuple[int, int] = (12, 5),
         verbose: bool = False,
     ) -> "Portfolio":
         """

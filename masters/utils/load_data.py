@@ -162,7 +162,7 @@ def load_stock_data(
     start_date: str,
     end_date: str,
     step: int,
-    bucket_size: int = 200,
+    bucket_size: int = 500,
 ) -> Optional[pd.DataFrame]:
     """
     Loads historical stock data for multiple tickers from Finam and combines
