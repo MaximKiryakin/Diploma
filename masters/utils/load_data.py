@@ -10,9 +10,21 @@ from utils.logger import Logger
 import os
 from tqdm import tqdm
 from pycbrf.toolbox import ExchangeRates
+import pickle
 
 log = Logger(__name__)
 
+
+def load_pickle_object(file_path: str):
+    """Loads a pickled object from the specified file path."""
+    with open(file_path, "rb") as file:
+        obj = pickle.load(file)
+    return obj
+
+def update_pickle_object(file_path: str, obj) -> None:
+    """Saves an object to the specified file path using pickle."""
+    with open(file_path, "wb") as file:
+        pickle.dump(obj, file)
 
 def download_finam_quotes(
     ticker: str, period: int, start: str, end: str, bucket_size: int = 100
@@ -65,12 +77,13 @@ def download_finam_quotes(
     result_df, first_bucket = None, True
 
     total_intervals = (end_date - current_start) / delta
-    pbar = tqdm(total=total_intervals, desc=f"Downloading {ticker}", leave=False)
+    #pbar = tqdm(total=total_intervals, desc=f"Downloading {ticker}", leave=False)
 
     while current_start <= end_date:
+
         start_rev = current_start.strftime("%Y%m%d")
         end_rev = min(current_start + delta * bucket_size, end_date).strftime("%Y%m%d")
-
+        tmp = min(current_start + delta * bucket_size, end_date)
         params = urlencode(
             [
                 ("market", 0),  # Market type (0 - stocks)
@@ -81,10 +94,10 @@ def download_finam_quotes(
                 ("mf", current_start.month - 1),
                 ("yf", current_start.year),
                 ("from", current_start.date()),
-                ("dt", end_date.day),
-                ("mt", end_date.month - 1),
-                ("yt", end_date.year),
-                ("to", end_date.date()),
+                ("dt", tmp.day),
+                ("mt", tmp.month - 1),
+                ("yt", tmp.year),
+                ("to", tmp.date()),
                 ("p", period),
                 ("f", f"{ticker}_{start_rev}_{end_rev}"),
                 ("e", ".csv"),
@@ -114,26 +127,27 @@ def download_finam_quotes(
 
                 if lines[0][0] == "Запрашиваемая вами глубина недоступна":
                     current_start += delta
-                    pbar.update(1)
+                    log.info("Запрашиваемая вами глубина недоступна")
+
                     continue
 
                 if first_bucket:
                     result_df = pd.DataFrame(lines[1:], columns=lines[0])
                     first_bucket = False
                 else:
-                    result_df = pd.concat([result_df, pd.DataFrame(lines[1:])])
+                    result_df = pd.concat([result_df, pd.DataFrame(lines[1:], columns=result_df.columns)])
 
                 last_date = datetime.strptime(
                     f"{lines[-1][2]} {lines[-1][3]}", "%Y%m%d %H%M%S"
                 )
-                pbar.update((last_date + delta - current_start) / delta)
+                #pbar.update((last_date + delta - current_start) / delta)
                 current_start = last_date + delta
 
         except Exception as e:
             log.error(f"Download error for ticker {ticker}: {str(e)}")
             break
 
-    pbar.close()
+    #pbar.close()
     date = pd.to_datetime(result_df["<DATE>"])
     log.info(
         f"Downloaded dates range for ticker {ticker} : "
@@ -148,16 +162,17 @@ def load_stock_data(
     start_date: str,
     end_date: str,
     step: int,
-    bucket_size: int = 10,
+    bucket_size: int = 200,
 ) -> Optional[pd.DataFrame]:
     """
     Loads historical stock data for multiple tickers from Finam and combines
-    into a single DataFrame.
+    into a single DataFrame. If Finam data is truncated (starts later than start_date),
+    attempts to fetch missing history from Yahoo Finance.
 
     Args:
         tickers_list: List of tickers to download (e.g. ['SBER', 'GAZP']).
-        start_date: Start date in DD.MM.YYYY format.
-        end_date: End date in DD.MM.YYYY format.
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
         step: Timeframe step from predefined values:
             2 - 1 min, 3 - 5 min, 4 - 10 min, 5 - 15 min,
             6 - 30 min, 7 - hour, 8 - day, 9 - week, 10 - month.
@@ -175,12 +190,12 @@ def load_stock_data(
     Raises:
         ValueError: If `tickers_list` is empty or invalid dates are provided.
     """
-    if not tickers_list:
-        raise ValueError("Tickers list cannot be empty")
 
     total_df: Optional[pd.DataFrame] = None
-
+    req_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    import yfinance as yf
     for ticker in tickers_list:
+        # 1. Download from Finam
         ticker_data = download_finam_quotes(
             ticker=ticker,
             period=step,
@@ -189,10 +204,59 @@ def load_stock_data(
             bucket_size=bucket_size,
         )
 
+        dates = pd.to_datetime(ticker_data["<DATE>"], format="%Y%m%d")
+        finam_min_date = dates.min()
+
+        # print(ticker_data)
+        # if finam_min_date > req_start_dt:
+        #     log.info(f'Download data from finam: {finam_min_date}, requested start date: {req_start_dt}')
+        #     # Yahoo ticker format for MOEX
+        #     y_ticker = f"{ticker}.ME"
+        #     y_data = yf.download(
+        #         y_ticker,
+        #         start=req_start_dt.strftime("%Y-%m-%d"),
+        #         end=finam_min_date.strftime("%Y-%m-%d"),
+        #         progress=False,
+        #         interval="1d", # Assuming daily step for backfill
+        #         auto_adjust=False
+        #     )
+
+        #     if isinstance(y_data.columns, pd.MultiIndex):
+        #         y_data.columns = y_data.columns.get_level_values(0)
+
+        #     y_data = y_data.reset_index()
+
+        #     # Map columns to Finam format
+        #     df_y = pd.DataFrame()
+        #     df_y["<TICKER>"] = ticker
+        #     df_y["<PER>"] = step
+        #     df_y["<DATE>"] = y_data["Date"].dt.strftime("%Y%m%d")
+        #     df_y["<TIME>"] = "000000"
+        #     df_y["<OPEN>"] = y_data["Open"]
+        #     df_y["<HIGH>"] = y_data["High"]
+        #     df_y["<LOW>"] = y_data["Low"]
+        #     df_y["<CLOSE>"] = y_data["Close"]
+        #     df_y["<VOL>"] = y_data["Volume"]
+
+        #     # Filter to ensure no overlap (strictly less than finam_min_date)
+        #     if finam_min_date:
+        #         df_y = df_y[pd.to_datetime(df_y["<DATE>"], format="%Y%m%d") < finam_min_date]
+
+        #     if not df_y.empty:
+        #         log.info(f"Added {len(df_y)} records from Yahoo Finance for {ticker}")
+        #         if ticker_data is None:
+        #             ticker_data = df_y
+        #         else:
+        #             ticker_data = pd.concat([df_y, ticker_data], ignore_index=True)
+        #     else:
+        #         log.warning(f"Yahoo data for {ticker} was empty after filtering.")
+
+
         if total_df is None:
             total_df = ticker_data
         else:
-            total_df = pd.concat([total_df, ticker_data])
+            if ticker_data is not None:
+                total_df = pd.concat([total_df, ticker_data])
 
     return total_df
 
@@ -440,7 +504,7 @@ def get_rubusd_exchange_rate(
     return rates
 
 
-def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str) -> pd.DataFrame:
+def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str, update_backup: bool = True) -> pd.DataFrame:
     """
     Downloads inflation data from CBR (Central Bank of Russia).
 
@@ -448,6 +512,7 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str) -> pd.
         output_path (str): Path to save the inflation data.
         dt_start (str): Start date in format 'YYYY-MM-DD'.
         dt_calc (str): End date in format 'YYYY-MM-DD'.
+        update_backup (bool): If True, saves the downloaded data to output_path. Defaults to True.
 
     Returns:
         pd.DataFrame: Inflation data with columns 'Дата', 'Ключевая ставка, % годовых', 'Инфляция, % г/г', 'Цель по инфляции'
@@ -496,8 +561,9 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str) -> pd.
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    df.to_excel(output_path, index=False)
+    if update_backup:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        df.to_excel(output_path, index=False)
+        log.info(f"Inflation data saved: {len(df)} records to {output_path}")
 
-    log.info(f"Inflation data saved: {len(df)} records to {output_path}")
     return df
