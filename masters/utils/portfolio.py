@@ -490,6 +490,7 @@ class Portfolio:
             .assign(capitalization=lambda x: x["capitalization"].fillna(0))
         )
 
+        self.d['portfolio'] = self.d['portfolio'].sort_values(['ticker', 'date'])
         num_rows = len(self.d['portfolio'])
         portfolio_info = pd.DataFrame([{
             "Total Rows": num_rows,
@@ -515,7 +516,7 @@ class Portfolio:
 
         E = self.d['portfolio']["capitalization"].values.astype(float)
         D = self.d['portfolio']["debt"].values.astype(float)
-        sigma_E = self.d['portfolio']["quarterly_volatility"].values.astype(float)
+        sigma_E = self.d['portfolio']["volatility"].values.astype(float)
 
         def equations(vars, E_i, D_i, r_i, sigma_E_i, T_i):
             V, sigma_V = vars
@@ -909,23 +910,38 @@ class Portfolio:
             Portfolio: Updated portfolio with added dynamic features.
         """
 
-        self.d['portfolio']["quarterly_volatility"] = self.d['portfolio'].groupby(
-            ["ticker", pd.Grouper(key="date", freq="QE")]
-        )["close"].transform(
-            lambda x: np.std(np.log(x / x.shift(1)))
-            * np.sqrt(63)  # 63 ≈ среднее число торговых дней в квартале
+        self.d['portfolio']["log_return"] = self.d['portfolio'].groupby("ticker")["close"].transform(
+            lambda x: np.log(x / x.shift(1))
         )
 
-        self.d['portfolio']["quarterly_volatility"] = (
-            self.d['portfolio']["quarterly_volatility"].rolling(window=10).mean()
+        # Calculate monthly volatility for each month
+        # std(daily_returns) * sqrt(21) -> Monthly Volatility
+        monthly_vol = (
+            self.d['portfolio']
+            .groupby(["ticker", pd.Grouper(key="date", freq="ME")])["log_return"]
+            .std()
+            * np.sqrt(21)
         )
 
-        self.d['portfolio']["quarterly_volatility"] = self.d['portfolio'][
-            "quarterly_volatility"
-        ].bfill()
+        avg_monthly_vol = monthly_vol.groupby("ticker").mean()
 
-        # Adhoc values for missing quarterly volatility data
-        self.d['portfolio']["quarterly_volatility"] = 0.4
+        # Annualize volatility: Monthly * sqrt(12)
+        # Merton model requires annualized volatility
+        avg_annual_vol = avg_monthly_vol * np.sqrt(12)
+        global_avg_vol = avg_annual_vol.mean()
+
+        self.d['portfolio'] = (
+            self.d['portfolio']
+            .assign(
+                volatility=lambda x: x["ticker"].map(avg_annual_vol).fillna(global_avg_vol).fillna(0.4)
+            )
+            .drop(columns=["log_return"])
+        )
+
+        log.log_missing_values_summary(
+            self.d['portfolio'],
+              title="Portfolio Missing Values After Adding dynamic features"
+        )
 
         return self
 
