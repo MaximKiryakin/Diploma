@@ -108,7 +108,7 @@ class Portfolio:
         if use_backup_data and not update_backup:
 
             if not os.path.isfile(backup_path):
-                log.error(f"Backup file not found at {backup_path}")
+                log.error(f"Stocks backup file not found at {backup_path}")
                 return self
 
             data = load_pickle_object(backup_path)
@@ -124,16 +124,16 @@ class Portfolio:
                 if max_date < calc_date:
                     days_gap = (calc_date - max_date).days
                     log.warning(
-                        f"Backup data incomplete: ends on {max_date.date()}, but calculation "
+                        f"Stocks backup data incomplete: ends on {max_date.date()}, but calculation "
                         f"date is {self.dt_calc} ({days_gap} days gap). Using available data."
                     )
                 else:
-                    log.info(f"Using backup data from {start_date.date()} up to {calc_date.date()}")
+                    log.info(f"Using stocks backup data from {start_date.date()} up to {calc_date.date()}")
             else:
-                log.error("Backup file is empty")
+                log.error("Stocks backup file is empty")
                 return self
         else:
-            log.info(f"Downloading all data from {self.dt_start} to {self.dt_calc}")
+            log.info(f"Downloading all stock data from {self.dt_start} to {self.dt_calc}")
             data = load_stock_data(
                 tickers_list=target_tickers,
                 start_date=self.dt_start,
@@ -142,7 +142,7 @@ class Portfolio:
             )
             if update_backup:
                 update_pickle_object(backup_path, data)
-                log.info(f"Backup updated: {backup_path}")
+                log.info(f"Stocks backup updated: {backup_path}")
 
         data = (
             data
@@ -190,7 +190,7 @@ class Portfolio:
 
         target_tickers = self.tickers_list if tickers_list is None else tickers_list
         multipliers_df = None
-        calc_date = pd.to_datetime(self.dt_calc)
+        calc_date  = pd.to_datetime(self.dt_calc)
         start_date = pd.to_datetime(self.dt_start)
 
         if use_backup and os.path.isfile(backup_path):
@@ -199,24 +199,30 @@ class Portfolio:
 
             max_date = pd.to_datetime(multipliers_df["date"]).max()
             min_date = pd.to_datetime(multipliers_df["date"]).min()
-            log.info(f"Backup loaded. Range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
 
             if max_date < calc_date:
                 if update_backup:
-                    log.warning(f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, Required: {calc_date.strftime('%Y-%m-%d')}). Downloading fresh data...")
+                    log.warning(
+                        f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, "
+                        f"Required: {calc_date.strftime('%Y-%m-%d')}). Downloading fresh data..."
+                    )
                     multipliers_df = None
                 else:
-                    log.warning(f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, Required: {calc_date.strftime('%Y-%m-%d')}). Using outdated backup.")
+                    log.warning(
+                        f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, "
+                        f"Required: {calc_date.strftime('%Y-%m-%d')}). Using outdated backup."
+                    )
             else:
-                log.info(f"Using backup data from {start_date.date()} up to {calc_date.date()}")
+                log.info(f"Using multipliers backup data from {start_date.date()} up to {calc_date.date()}")
 
         if multipliers_df is None:
+
+            log.info(f"Downloading all multipliers data from {self.dt_start} to {self.dt_calc}")
 
             multipliers_raw = load_multipliers(
                 companies_list=target_tickers,
                 update_backup=False
             )
-            log.info("Downloaded fresh multipliers data")
 
             multipliers_df = (
                 pd.melt(
@@ -246,14 +252,11 @@ class Portfolio:
                 .rename(columns={"company": "ticker"})
             )
 
-            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-            with open(backup_path, "wb") as f:
-                pickle.dump(multipliers_df, f)
+            update_pickle_object(backup_path, multipliers_df)
             log.info(f"Multipliers backup updated: {backup_path}")
 
         if multipliers_df is not None and not multipliers_df.empty:
 
-            # Apply filtration for the requested period
             multipliers_df = multipliers_df[
                 (multipliers_df["date"] >= start_date) &
                 (multipliers_df["date"] <= calc_date)
@@ -294,7 +297,7 @@ class Portfolio:
         update_rub_usd: bool = False,
         update_unemployment: bool = False,
         inflation_path: str = "data/macro/inflation.xlsx",
-        rub_usd_backup_path: str = "data/backup/rub_usd.pkl",
+        rub_usd_path: str = "data/macro/rubusd.csv",
         unemployment_path: str = "data/macro/unemployment.xlsx",
     ) -> "Portfolio":
         """
@@ -311,6 +314,7 @@ class Portfolio:
         Returns:
             Portfolio: Updated portfolio with added macroeconomic data.
         """
+
         calc_date = pd.to_datetime(self.dt_calc)
         start_date = pd.to_datetime(self.dt_start)
 
@@ -326,7 +330,7 @@ class Portfolio:
                 log.info("Downloaded fresh unemployment data")
         else:
             unemployment = pd.read_excel(unemployment_path)
-            log.info(f"Loaded unemployment data from backup")
+            log.info(f"Loaded Unemployment data from backup")
 
         self.d['macro_unemployment'] = (
             unemployment
@@ -337,12 +341,7 @@ class Portfolio:
             [["dtReportLast", "unemployment_rate"]]
         )
 
-        # Log unemployment period
-        if not self.d['macro_unemployment'].empty:
-             min_date = self.d['macro_unemployment']['dtReportLast'].min().strftime('%Y-%m-%d')
-             max_date = self.d['macro_unemployment']['dtReportLast'].max().strftime('%Y-%m-%d')
-             period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
-             log.log_dataframe(period_df, title="Loaded Unemployment Data Period")
+        self._log_data_period(self.d['macro_unemployment'], "dtReportLast", "Loaded Unemployment Data Period")
 
         # 2. Load and process Inflation & Interest Rate
         if update_inflation or not os.path.isfile(inflation_path):
@@ -359,7 +358,7 @@ class Portfolio:
         else:
             inflation = pd.read_excel(inflation_path)
             max_inflation_date = pd.to_datetime(inflation["Дата"]).max()
-            log.info(f"Loaded inflation data from backup. Last date: {max_inflation_date.strftime('%Y-%m-%d')}")
+            log.info(f"Loaded inflation data from backup")
 
         self.d['macro_inflation'] = (
             inflation
@@ -381,8 +380,6 @@ class Portfolio:
         self._log_data_period(self.d['macro_inflation'], "dtReportLast", "Loaded Inflation Data Period")
 
         # 3. Load and process USD/RUB Exchange Rate
-        rub_usd_path = "data/macro/rubusd.csv"
-
         if update_rub_usd or not os.path.isfile(rub_usd_path):
             rub_usd = get_rubusd_exchange_rate(
                 dt_calc=self.dt_calc, dt_start=self.dt_start, update_backup=update_rub_usd
@@ -394,7 +391,7 @@ class Portfolio:
         else:
             rub_usd = pd.read_csv(rub_usd_path)
             max_rub_usd_date = pd.to_datetime(rub_usd["date"]).max()
-            log.info(f"Loaded USD/RUB exchange rate from backup. Last date: {max_rub_usd_date.strftime('%Y-%m-%d')}")
+            log.info(f"Loaded USD/RUB exchange rate from backup")
 
         self.d['macro_rub_usd'] = (
             rub_usd
@@ -416,14 +413,12 @@ class Portfolio:
             Portfolio: Created portfolio.
         """
 
-        # 1. Start with stocks
-        self.d['portfolio'] = self.d['stocks'].copy()
-
         self.d['portfolio'] = (
-            self.d['portfolio']
+            self.d['stocks'].copy()
             .assign(dtReportLast=lambda x: (x["date"] + pd.offsets.MonthEnd(0)).dt.normalize())
             .merge(
-                self.d['multipliers'].drop(columns=['date']), on=["ticker", "year", "quarter"], how="left"
+                self.d['multipliers'].drop(columns=['date']),
+                on=["ticker", "year", "quarter"], how="left"
             )
             .merge(self.d['macro_inflation'], on="dtReportLast", how="left")
             .merge(self.d['macro_unemployment'], on="dtReportLast", how="left")
@@ -431,7 +426,6 @@ class Portfolio:
             .drop(columns=["EV/EBITDA", "P/BV", "P/S", "Долг/EBITDA", "P/FCF", "time"])
         )
 
-        # Adjust data types
         columns_new_names = {
             "Капитализация, млрд руб": "capitalization",
         }
@@ -450,7 +444,6 @@ class Portfolio:
                 if "млрд руб" in col:
                     self.d['portfolio'][col] *= 1e9
 
-        # selfulate Debt logic
         self.d['portfolio']["debt"] = np.select(
             [
                 (self.d['portfolio']["Долг, млрд руб"].notna()) & (self.d['portfolio']["Долг, млрд руб"].ne(0)),
@@ -489,11 +482,13 @@ class Portfolio:
         portfolio_info = pd.DataFrame([{
             "Total Rows": num_rows,
             "Unique Companies": len(self.d['portfolio'].ticker.unique()),
-            "Date Range": f"{self.d['portfolio']['date'].min().strftime('%Y-%m-%d')} to {self.d['portfolio']['date'].max().strftime('%Y-%m-%d')}"
+            "Date Range":
+                f"{self.d['portfolio']['date'].min().strftime('%Y-%m-%d')} to"
+                + f" {self.d['portfolio']['date'].max().strftime('%Y-%m-%d')}"
         }])
-        log.log_dataframe(portfolio_info, title="Portfolio Dimensions")
 
         log.log_missing_values_summary(self.d['portfolio'], title="Portfolio Missing Values After Filling")
+        log.log_dataframe(portfolio_info, title="Portfolio Dimensions")
 
         return self
 
