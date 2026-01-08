@@ -9,6 +9,8 @@ import pandas as pd
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
 DEFAULT_LOG_FILE = os.path.join("logs", "app.log")
+
+#FORMAT = "%(asctime)s:%(name)s:%(funcName)s:%(levelname)s: %(message)s"
 FORMAT = "%(asctime)s:%(name)s:%(levelname)s: %(message)s"
 
 def _log_missing_values_summary(self, dataframe_or_dict, title: str = "Missing Values Summary") -> None:
