@@ -117,7 +117,7 @@ class Portfolio:
 
                 max_date = pd.to_datetime(data['<DATE>'], format='%Y%m%d').max()
                 data = data[
-                    (pd.to_datetime(data['<DATE>'], format='%Y%m%d') >= start_date) & 
+                    (pd.to_datetime(data['<DATE>'], format='%Y%m%d') >= start_date) &
                     (pd.to_datetime(data['<DATE>'], format='%Y%m%d') <= calc_date)
                 ]
 
@@ -191,13 +191,15 @@ class Portfolio:
         target_tickers = self.tickers_list if tickers_list is None else tickers_list
         multipliers_df = None
         calc_date = pd.to_datetime(self.dt_calc)
+        start_date = pd.to_datetime(self.dt_start)
 
         if use_backup and os.path.isfile(backup_path):
 
             multipliers_df = load_pickle_object(backup_path)
 
             max_date = pd.to_datetime(multipliers_df["date"]).max()
-            log.info(f"Backup loaded. Last date: {max_date.strftime('%Y-%m-%d')}")
+            min_date = pd.to_datetime(multipliers_df["date"]).min()
+            log.info(f"Backup loaded. Range: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
 
             if max_date < calc_date:
                 if update_backup:
@@ -206,7 +208,7 @@ class Portfolio:
                 else:
                     log.warning(f"Backup outdated (Last: {max_date.strftime('%Y-%m-%d')}, Required: {calc_date.strftime('%Y-%m-%d')}). Using outdated backup.")
             else:
-                log.info("Backup is up to date.")
+                log.info(f"Using backup data from {start_date.date()} up to {calc_date.date()}")
 
         if multipliers_df is None:
 
@@ -251,15 +253,23 @@ class Portfolio:
 
         if multipliers_df is not None and not multipliers_df.empty:
 
-            min_date = multipliers_df["date"].min().strftime('%Y-%m-%d')
-            max_date = multipliers_df["date"].max().strftime('%Y-%m-%d')
-            calc_date_str = calc_date.strftime('%Y-%m-%d')
+            # Apply filtration for the requested period
+            multipliers_df = multipliers_df[
+                (multipliers_df["date"] >= start_date) &
+                (multipliers_df["date"] <= calc_date)
+            ].copy()
 
-            period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
-            log.log_dataframe(period_df, title="Loaded Multipliers Data Period")
+            if not multipliers_df.empty:
+                min_date = multipliers_df["date"].min().strftime('%Y-%m-%d')
+                max_date = multipliers_df["date"].max().strftime('%Y-%m-%d')
 
-            if max_date < calc_date_str:
-                log.warning(f"Loaded multipliers data ends at {max_date}, but calculation date requires {calc_date_str}.")
+                period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
+                log.log_dataframe(period_df, title="Loaded Multipliers Data Period")
+
+                if max_date < calc_date.strftime('%Y-%m-%d'):
+                    log.warning(f"Loaded multipliers data ends at {max_date}, but calculation date requires {self.dt_calc}.")
+            else:
+                log.error(f"No multipliers data found for the period {self.dt_start} - {self.dt_calc}")
 
         self.d['multipliers'] = multipliers_df
         log.log_missing_values_summary(self.d['multipliers'], title="Multipliers Data Missing Values")
@@ -301,6 +311,8 @@ class Portfolio:
         Returns:
             Portfolio: Updated portfolio with added macroeconomic data.
         """
+        calc_date = pd.to_datetime(self.dt_calc)
+        start_date = pd.to_datetime(self.dt_start)
 
         # 1. Load Unemployment Data
         if update_unemployment or not os.path.isfile(unemployment_path):
@@ -321,6 +333,7 @@ class Portfolio:
             .rename(columns={"Unemployment": "unemployment_rate", "Date": "date"})
             .assign(dtReportLast=lambda x: (pd.to_datetime(x["date"]) + pd.offsets.MonthEnd(0)).dt.normalize())
             .assign(unemployment_rate = lambda x: x.unemployment_rate / 100)
+            .query("dtReportLast >= @start_date and dtReportLast <= @calc_date")
             [["dtReportLast", "unemployment_rate"]]
         )
 
@@ -361,6 +374,7 @@ class Portfolio:
                 interest_rate=lambda x: x["interest_rate"] / 100,
                 inflation=lambda x: x["inflation"] / 100
             )
+            .query("dtReportLast >= @start_date and dtReportLast <= @calc_date")
             [["dtReportLast", "interest_rate", "inflation"]]
         )
 
@@ -385,6 +399,7 @@ class Portfolio:
         self.d['macro_rub_usd'] = (
             rub_usd
             .assign(date=lambda x: pd.to_datetime(x["date"]).dt.normalize())
+            .query("date >= @start_date and date <= @calc_date")
             [["date", "rubusd_exchange_rate"]]
         )
 
