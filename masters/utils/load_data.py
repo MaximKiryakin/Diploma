@@ -451,30 +451,34 @@ def get_rubusd_exchange_rate(
 
     if os.path.exists(rubusd_df_path):
         rates = pd.read_csv(rubusd_df_path)
-        # Start from the next day after the last available date
-        last_date = pd.to_datetime(rates.date.max())
-        start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Check if requested range is covered by backup
+        rates_min = pd.to_datetime(rates.date.min())
+        rates_max = pd.to_datetime(rates.date.max())
+        if rates_min <= pd.to_datetime(dt_start) and rates_max >= pd.to_datetime(dt_calc):
+            log.info("Exchange rates are up to date.")
+            return rates
     else:
         rates = None
-        start_date = dt_start
 
-    # Check if we need to download anything
-    if pd.to_datetime(start_date) > pd.to_datetime(dt_calc):
-        log.info("Exchange rates are up to date.")
-        return rates
-
-    date_range = pd.date_range(
-        start=pd.to_datetime(start_date, format="%Y-%m-%d"),
+    # Calculate missing dates in the requested range
+    full_range = pd.date_range(
+        start=pd.to_datetime(dt_start, format="%Y-%m-%d"),
         end=pd.to_datetime(dt_calc, format="%Y-%m-%d"),
         freq="D",
     )
 
-    if not date_range.empty:
+    if rates is not None:
+        existing_dates = set(pd.to_datetime(rates.date).dt.strftime("%Y-%m-%d"))
+        missing_dates = [d for d in full_range if d.strftime("%Y-%m-%d") not in existing_dates]
+    else:
+        missing_dates = list(full_range)
+
+    if missing_dates:
         rates_additional = []
         log.info(
-            f"Downloading new usd/rub exchange rates from {start_date} to {dt_calc}"
+            f"Downloading {len(missing_dates)} missing usd/rub exchange rates"
         )
-        for date in tqdm(date_range):
+        for date in tqdm(missing_dates):
             for attempt in range(3):
                 try:
                     rate = float(ExchangeRates(date)["USD"].value)
@@ -492,12 +496,12 @@ def get_rubusd_exchange_rate(
             new_rates = pd.DataFrame(rates_additional, columns=["date", "rubusd_exchange_rate"])
             rates = new_rates if rates is None else pd.concat([rates, new_rates])
 
-
-    if update_backup:
+    if update_backup and rates is not None:
+        rates = rates.drop_duplicates(subset=["date"]).sort_values("date")
         rates.to_csv(rubusd_df_path, index=False)
 
         log.info(
-            f"Backup file for usd/rub exchange rates was updated."
+            f"Backup file for usd/rub exchange rates was updated. "
             f"New dates range: {rates.date.min()} : {rates.date.max()}"
         )
 
@@ -567,3 +571,58 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str, update
         log.info(f"Inflation data saved: {len(df)} records to {output_path}")
 
     return df
+
+
+def get_unemployment_data(output_path: str, update_backup: bool = True) -> pd.DataFrame:
+    """
+    Downloads Russian unemployment data from TradingView (ECONOMICS:RUUR).
+
+    Args:
+        output_path: Path to save the data (Excel format).
+        update_backup: Whether to save to disk.
+
+    Returns:
+        pd.DataFrame: Unemployment data with 'Date' and 'Unemployment' columns.
+    """
+    try:
+        from tvDatafeed import TvDatafeed, Interval
+    except ImportError:
+        log.error("tvDatafeed library not found. Please install it using: \n"
+                  "pip install https://github.com/rongardF/tvdatafeed/archive/refs/heads/main.zip")
+        if os.path.exists(output_path):
+            return pd.read_excel(output_path)
+        return pd.DataFrame()
+
+    try:
+        tv = TvDatafeed()
+        # RUUR - Russian Unemployment Rate
+        df = tv.get_hist(
+            symbol='RUUR', 
+            exchange='ECONOMICS', 
+            interval=Interval.in_monthly, 
+            n_bars=5000
+        )
+        
+        if df is None or df.empty:
+            log.error("Failed to download data from TradingView.")
+            if os.path.exists(output_path):
+                return pd.read_excel(output_path)
+            return pd.DataFrame()
+            
+        df = df.reset_index()
+        # Returning monthly data as requested by user
+        monthly_df = df[['datetime', 'close']].copy()
+        monthly_df.columns = ['Date', 'Unemployment']
+        
+        if update_backup:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            monthly_df.to_excel(output_path, index=False)
+            log.info(f"Unemployment data saved to {output_path}")
+
+        return monthly_df
+
+    except Exception as e:
+        log.error(f"Error downloading unemployment data: {e}")
+        if os.path.exists(output_path):
+            return pd.read_excel(output_path)
+        return pd.DataFrame()
