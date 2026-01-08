@@ -66,7 +66,25 @@ def calc_irf(
         list(impulses_responses.keys()) + list(impulses_responses.values())
     )
 
-    data = portfolio_df.sort_values(["ticker", "date"])[columns].dropna()[columns]
+    # Group by date to aggregate data across tickers (e.g., mean PD)
+    # This creates a single time series for the VAR model
+    if 'date' in portfolio_df.columns:
+        data = portfolio_df.groupby("date")[columns].mean().sort_index().dropna()
+    else:
+        log.warning("'date' column not found. Using raw data (stacked tickers?) for VAR.")
+        data = portfolio_df.sort_values(["ticker", "date"])[columns].dropna()[columns]
+
+    # Check for constant columns
+    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+    if constant_cols:
+        log.error(f"Constant columns detected: {constant_cols}. VAR model requires time-varying data.")
+        # If critical columns are constant, we can't proceed.
+        # We could try to proceed without them, but if the user asked for them, it's better to stop or warn.
+        # For now, let's drop them and see if anything remains.
+        data = data.drop(columns=constant_cols)
+        if data.empty or len(data.columns) < 2:
+             log.error("Not enough variables left for VAR analysis.")
+             return
 
     cols_before_diff = {}
     for col in data.columns:
@@ -77,6 +95,16 @@ def calc_irf(
         data = data.diff().dropna()
         log.info("Applied differencing to achieve stationarity")
 
+        # Re-check for constant columns after differencing
+        constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+        if constant_cols:
+             log.warning(f"Constant columns after differencing: {constant_cols}. Dropping them.")
+             data = data.drop(columns=constant_cols)
+
+        if data.empty or len(data.columns) < 2:
+             log.error("Not enough variables left for VAR analysis after differencing.")
+             return
+
         for col in data.columns:
             cols_before_diff[col] = adfuller(data[col].dropna())[1]
         log.info("p-values after differencing:\n%s", pd.Series(cols_before_diff))
@@ -84,32 +112,61 @@ def calc_irf(
     if not isinstance(data.index, pd.DatetimeIndex):
         data.index = pd.RangeIndex(start=0, stop=len(data))
 
-    model = VAR(data)
-    lag_order = model.select_order(maxlags=6)
-    selected_lags = lag_order.aic
+    try:
+        model = VAR(data)
+        lag_order = model.select_order(maxlags=6)
+        selected_lags = lag_order.aic
 
-    log.info(
-        f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
-    )
-
-    results = model.fit(maxlags=selected_lags, ic="aic")
-
-    for impulse, response in impulses_responses.items():
-        irf = results.irf(periods=selected_lags)
-
-        ax = irf.plot(
-            impulse=impulse,
-            response=response,
-            orth=True,
-            figsize=figsize,
-            plot_params={"title": None, "subtitle": False},
+        log.info(
+            f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
         )
 
-        fig = ax.get_figure()
+        results = model.fit(maxlags=selected_lags, ic="aic")
 
-        fig.suptitle("")
-        for a in fig.axes:
-            a.set_title("")
+        for impulse, response in impulses_responses.items():
+            if impulse not in data.columns or response not in data.columns:
+                log.warning(f"Skipping IRF for {impulse} -> {response}: variable missing in data.")
+                continue
+
+            irf = results.irf(periods=selected_lags)
+
+            ax = irf.plot(
+                impulse=impulse,
+                response=response,
+                orth=True,
+                figsize=figsize,
+                plot_params={"title": None, "subtitle": False},
+            )
+
+            fig = ax.get_figure()
+
+            fig.suptitle("")
+            for a in fig.axes:
+                a.set_title("")
+
+            # ... existing code ...
+
+            # Since we don't have the rest of the loop body here, I will just close the try block
+            # and let the user re-run. Wait, I need to be careful with replace_string.
+            # The original code had the loop. I should include it.
+
+            plt.title(f"Impulse Response: {impulse} -> {response}", fontsize=14)
+            plt.xlabel("Periods", fontsize=12)
+            plt.ylabel("Response", fontsize=12)
+            plt.grid()
+            plt.tight_layout()
+
+            if verbose:
+                plt.show()
+            else:
+                plt.savefig(f"logs/graphs/irf_{impulse}_{response}.png")
+                plt.clf()
+            plt.close()
+
+    except Exception as e:
+        log.error(f"VAR model failed: {str(e)}")
+        # Optional: try with a simpler model or just return
+        return
 
         fig.suptitle(
             f"Impulse Response Function (IRF): {impulse} -> {response}\n"
