@@ -3,6 +3,7 @@ from utils.load_data import (
     load_multipliers,
     get_rubusd_exchange_rate,
     get_cbr_inflation_data,
+    get_unemployment_data,
     load_pickle_object,
     update_pickle_object
 )
@@ -26,6 +27,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.linear_model import Ridge
 import sys
+from tqdm import tqdm
 import matplotlib
 from datetime import datetime, timedelta
 import re
@@ -101,6 +103,7 @@ class Portfolio:
 
         target_tickers = self.tickers_list if tickers_list is None else tickers_list
         calc_date = pd.to_datetime(self.dt_calc)
+        start_date = pd.to_datetime(self.dt_start)
 
         if use_backup_data and not update_backup:
 
@@ -113,7 +116,10 @@ class Portfolio:
             if data is not None and not data.empty:
 
                 max_date = pd.to_datetime(data['<DATE>'], format='%Y%m%d').max()
-                data = data[pd.to_datetime(data['<DATE>'], format='%Y%m%d') <= calc_date]
+                data = data[
+                    (pd.to_datetime(data['<DATE>'], format='%Y%m%d') >= start_date) & 
+                    (pd.to_datetime(data['<DATE>'], format='%Y%m%d') <= calc_date)
+                ]
 
                 if max_date < calc_date:
                     days_gap = (calc_date - max_date).days
@@ -122,7 +128,7 @@ class Portfolio:
                         f"date is {self.dt_calc} ({days_gap} days gap). Using available data."
                     )
                 else:
-                    log.info(f"Using backup data up to {max_date.date()}")
+                    log.info(f"Using backup data from {start_date.date()} up to {calc_date.date()}")
             else:
                 log.error("Backup file is empty")
                 return self
@@ -141,12 +147,12 @@ class Portfolio:
         data = (
             data
             .assign(date_col=lambda x: pd.to_datetime(x['<DATE>'], format='%Y%m%d'))
-            .query('date_col <= @calc_date')
+            .query('date_col >= @start_date and date_col <= @calc_date')
             .drop(columns=['date_col'])
             .rename(
                 columns={col: col[1:-1].lower() for col in data.columns}
             )
-            .assign(date=lambda x: pd.to_datetime(x["date"]))
+            .assign(date=lambda x: pd.to_datetime(x["date"]).dt.normalize())
             .assign(quarter=lambda x: pd.to_datetime(x["date"]).dt.quarter)
             .assign(year=lambda x: pd.to_datetime(x["date"]).dt.year)
             .drop(columns=["per", "vol"])
@@ -276,6 +282,7 @@ class Portfolio:
         self,
         update_inflation: bool = False,
         update_rub_usd: bool = False,
+        update_unemployment: bool = False,
         inflation_path: str = "data/macro/inflation.xlsx",
         rub_usd_backup_path: str = "data/backup/rub_usd.pkl",
         unemployment_path: str = "data/macro/unemployment.xlsx",
@@ -286,26 +293,42 @@ class Portfolio:
         Args:
             update_inflation (bool): If True, downloads fresh inflation data from CBR and updates backup. Defaults to False.
             update_rub_usd (bool): If True, downloads fresh USD/RUB exchange rate data. Defaults to False.
+            update_unemployment (bool): If True, downloads fresh unemployment data from TradingView. Defaults to False.
             inflation_path (str): Path to inflation data file. Defaults to "data/macro/inflation.xlsx".
             rub_usd_backup_path (str): Path to USD/RUB exchange rate backup. Defaults to "data/backup/rub_usd.pkl".
+            unemployment_path (str): Path to unemployment data file. Defaults to "data/macro/unemployment.xlsx".
 
         Returns:
             Portfolio: Updated portfolio with added macroeconomic data.
         """
 
-        # TODO: сделать тут загрузку из инета
+        # 1. Load Unemployment Data
+        if update_unemployment or not os.path.isfile(unemployment_path):
+            unemployment = get_unemployment_data(
+                unemployment_path,
+                update_backup=update_unemployment
+            )
+            if update_unemployment:
+                log.info("Downloaded fresh unemployment data and updated backup")
+            else:
+                log.info("Downloaded fresh unemployment data")
+        else:
+            unemployment = pd.read_excel(unemployment_path)
+            log.info(f"Loaded unemployment data from backup")
+
         self.d['macro_unemployment'] = (
-            pd.read_excel(unemployment_path)
-            .rename(columns={"Unemployment": "unemployment_rate"})
+            unemployment
+            .rename(columns={"Unemployment": "unemployment_rate", "Date": "date"})
+            .assign(dtReportLast=lambda x: (pd.to_datetime(x["date"]) + pd.offsets.MonthEnd(0)).dt.normalize())
             .assign(unemployment_rate = lambda x: x.unemployment_rate / 100)
-            .rename(columns={"Year": "year"})
+            [["dtReportLast", "unemployment_rate"]]
         )
 
-        # Log unemployment period (using 'year' as proxy for date range)
+        # Log unemployment period
         if not self.d['macro_unemployment'].empty:
-             min_year = self.d['macro_unemployment']['year'].min()
-             max_year = self.d['macro_unemployment']['year'].max()
-             period_df = pd.DataFrame([{"Start Year": min_year, "End Year": max_year}])
+             min_date = self.d['macro_unemployment']['dtReportLast'].min().strftime('%Y-%m-%d')
+             max_date = self.d['macro_unemployment']['dtReportLast'].max().strftime('%Y-%m-%d')
+             period_df = pd.DataFrame([{"Start Date": min_date, "End Date": max_date}])
              log.log_dataframe(period_df, title="Loaded Unemployment Data Period")
 
         # 2. Load and process Inflation & Interest Rate
@@ -327,7 +350,7 @@ class Portfolio:
 
         self.d['macro_inflation'] = (
             inflation
-            .assign(dtReportLast=lambda x: pd.to_datetime(x["Дата"]) + pd.offsets.MonthEnd(0))
+            .assign(dtReportLast=lambda x: (pd.to_datetime(x["Дата"]) + pd.offsets.MonthEnd(0)).dt.normalize())
             .rename(
                 columns={
                     "Ключевая ставка, % годовых": "interest_rate",
@@ -361,7 +384,7 @@ class Portfolio:
 
         self.d['macro_rub_usd'] = (
             rub_usd
-            .assign(date=lambda x: pd.to_datetime(x["date"]))
+            .assign(date=lambda x: pd.to_datetime(x["date"]).dt.normalize())
             [["date", "rubusd_exchange_rate"]]
         )
 
@@ -383,12 +406,12 @@ class Portfolio:
 
         self.d['portfolio'] = (
             self.d['portfolio']
-            .assign(dtReportLast=lambda x: x["date"] + pd.offsets.MonthEnd(0))
+            .assign(dtReportLast=lambda x: (x["date"] + pd.offsets.MonthEnd(0)).dt.normalize())
             .merge(
                 self.d['multipliers'].drop(columns=['date']), on=["ticker", "year", "quarter"], how="left"
             )
             .merge(self.d['macro_inflation'], on="dtReportLast", how="left")
-            .merge(self.d['macro_unemployment'], on="year", how="left")
+            .merge(self.d['macro_unemployment'], on="dtReportLast", how="left")
             .merge(self.d['macro_rub_usd'], on="date", how="left")
             .drop(columns=["EV/EBITDA", "P/BV", "P/S", "Долг/EBITDA", "P/FCF", "time"])
         )
@@ -440,7 +463,7 @@ class Portfolio:
             .assign(debt=lambda x: x.groupby("ticker")["debt"].transform(lambda g: g.ffill().bfill()))
             .assign(debt=lambda x: x["debt"].fillna(0))
             .assign(inflation=lambda x: x["inflation"].ffill().bfill())
-            .assign(unemployment_rate=lambda x: x["inflation"].ffill().bfill())
+            .assign(unemployment_rate=lambda x: x["unemployment_rate"].ffill().bfill())
             .rename(columns=columns_new_names)
             .assign(capitalization=lambda x: x.groupby("ticker")["capitalization"].transform(lambda g: g.ffill().bfill()))
             .assign(capitalization=lambda x: x["capitalization"].fillna(0))
@@ -490,7 +513,8 @@ class Portfolio:
         # Initial guesses for all elements
         initial_guess = np.vstack([E + D, sigma_E]).T
 
-        # Solve for each element
+        # Solve for each element with progress monitoring
+        log.info(f"Starting Merton model calculations for {len(initial_guess)} rows...")
         results = np.array(
             [
                 root(
@@ -504,7 +528,7 @@ class Portfolio:
                         T,
                     ),
                 ).x
-                for i, guess in enumerate(initial_guess)
+                for i, guess in enumerate(tqdm(initial_guess, desc="Solving Merton equations"))
             ]
         )
 
