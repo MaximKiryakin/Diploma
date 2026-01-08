@@ -193,7 +193,7 @@ def load_stock_data(
 
     total_df: Optional[pd.DataFrame] = None
     req_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    import yfinance as yf
+
     for ticker in tickers_list:
         # 1. Download from Finam
         ticker_data = download_finam_quotes(
@@ -449,16 +449,7 @@ def get_rubusd_exchange_rate(
 
         return rates
 
-    if os.path.exists(rubusd_df_path):
-        rates = pd.read_csv(rubusd_df_path)
-        # Check if requested range is covered by backup
-        rates_min = pd.to_datetime(rates.date.min())
-        rates_max = pd.to_datetime(rates.date.max())
-        if rates_min <= pd.to_datetime(dt_start) and rates_max >= pd.to_datetime(dt_calc):
-            log.info("Exchange rates are up to date.")
-            return rates
-    else:
-        rates = None
+    rates = None
 
     # Calculate missing dates in the requested range
     full_range = pd.date_range(
@@ -568,7 +559,6 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str, update
     if update_backup:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         df.to_excel(output_path, index=False)
-        log.info(f"Inflation data saved: {len(df)} records to {output_path}")
 
     return df
 
@@ -597,23 +587,23 @@ def get_unemployment_data(output_path: str, update_backup: bool = True) -> pd.Da
         tv = TvDatafeed()
         # RUUR - Russian Unemployment Rate
         df = tv.get_hist(
-            symbol='RUUR', 
-            exchange='ECONOMICS', 
-            interval=Interval.in_monthly, 
+            symbol='RUUR',
+            exchange='ECONOMICS',
+            interval=Interval.in_monthly,
             n_bars=5000
         )
-        
+
         if df is None or df.empty:
             log.error("Failed to download data from TradingView.")
             if os.path.exists(output_path):
                 return pd.read_excel(output_path)
             return pd.DataFrame()
-            
+
         df = df.reset_index()
         # Returning monthly data as requested by user
         monthly_df = df[['datetime', 'close']].copy()
         monthly_df.columns = ['Date', 'Unemployment']
-        
+
         if update_backup:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             monthly_df.to_excel(output_path, index=False)
