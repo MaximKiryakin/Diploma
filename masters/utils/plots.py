@@ -407,3 +407,73 @@ def plot_macro_significance(
     else:
         plt.clf()
     plt.close()
+
+def plot_macro_forecast(
+    macro_df: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    tail: int = 0,
+    figsize: tuple = (12, 8),
+    verbose: bool = False,
+):
+    """
+    Plots historical and forecasted values for macro parameters.
+
+    Args:
+        macro_df (pd.DataFrame): Historical macro data.
+        forecast_df (pd.DataFrame): Forecasted macro data.
+        tail (int): Number of last months to show. If 0, shows all history.
+        figsize (tuple): Figure size.
+        verbose (bool): Whether to show the plot.
+    """
+    factors = macro_df.columns
+    n_factors = len(factors)
+
+    fig, axes = plt.subplots(n_factors, 1, figsize=figsize, sharex=True)
+    if n_factors == 1:
+        axes = [axes]
+
+    # Apply tail to history for visualization
+    plot_df = macro_df.tail(tail) if tail > 0 else macro_df
+
+    for i, factor in enumerate(factors):
+        ax = axes[i]
+
+        # Plot history
+        ax.plot(plot_df.index, plot_df[factor], label="History (Fact)", color="royalblue", linewidth=2)
+
+        # Plot forecast (connect to the last point before forecast started)
+        first_fc_date = forecast_df.index[0]
+        history_before_fc = macro_df[macro_df.index < first_fc_date]
+
+        if not history_before_fc.empty:
+            last_hist_before = history_before_fc.index[-1]
+            last_val_before = history_before_fc[factor].iloc[-1]
+            fc_dates = [last_hist_before] + list(forecast_df.index)
+            fc_vals = [last_val_before] + list(forecast_df[factor])
+        else:
+            fc_dates = list(forecast_df.index)
+            fc_vals = list(forecast_df[factor])
+
+        ax.plot(fc_dates, fc_vals, label="Forecast", color="darkred", linestyle="--", linewidth=2)
+        ax.scatter(forecast_df.index, forecast_df[factor], color="darkred", s=30)
+
+        ax.set_title(f"Forecast: {factor}", fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    plt.xlabel("Date", fontsize=10)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    save_path = "logs/graphs/macro_forecast.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+
+    log.info(f"Macro forecast plot saved: {save_path}")
+
