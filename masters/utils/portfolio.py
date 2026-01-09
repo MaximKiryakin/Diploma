@@ -10,6 +10,7 @@ from utils.load_data import (
 from utils.logger import Logger
 from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 import pickle
+import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
 import os
 from sklearn.utils import resample
@@ -631,6 +632,170 @@ class Portfolio:
 
         return self
 
+    def predict_macro_factors(self, horizon: int = 1) -> pd.DataFrame:
+        """
+        Predicts macroeconomic factors for a specified horizon using a VAR model.
+        Uses data from the existing portfolio dataframe.
+        Supports negative horizon for backtesting (e.g. -1 predicts the last known month).
+
+        Args:
+            horizon (int): Number of months to predict. Positive for future, negative for backtest.
+
+        Returns:
+            pd.DataFrame: DataFrame containing forecasted macro variables.
+        """
+        if 'portfolio' not in self.d or self.d['portfolio'] is None:
+            log.error("Portfolio not created. Cannot predict macro factors.")
+            return pd.DataFrame()
+
+        macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
+        existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
+
+        if not existing_cols:
+            log.warning("No macro columns found in portfolio.")
+            return pd.DataFrame()
+
+        # Extract macro data
+        macro_df_full = (
+            self.d['portfolio'][['date'] + existing_cols]
+            .drop_duplicates('date')
+            .set_index('date')
+            .resample('ME')
+            .mean()
+            .dropna()
+        )
+
+        steps = abs(horizon)
+        if horizon > 0:
+            macro_df = macro_df_full
+        else:
+            if len(macro_df_full) <= steps:
+                log.error(f"Not enough macro data for backtest of {steps} steps.")
+                return pd.DataFrame()
+            macro_df = macro_df_full.iloc[:-steps]
+
+        if macro_df.empty:
+            log.warning("Prepared macro data is empty.")
+            return pd.DataFrame()
+
+        # Fit VAR model
+        model = VAR(macro_df)
+        max_lags = min(3, len(macro_df) // 2 - 1)
+        if max_lags < 1:
+            max_lags = 1
+
+        results = model.fit(maxlags=max_lags)
+
+        # Forecast
+        lag_order = results.k_ar
+        forecast_input = macro_df.values[-lag_order:]
+        fc = results.forecast(y=forecast_input, steps=steps)
+
+        # Generate future dates starting from the end of training data
+        last_date = macro_df.index[-1]
+        future_dates = [last_date + pd.DateOffset(months=i+1) for i in range(steps)]
+        future_dates = [pd.Timestamp(d).normalize() + pd.offsets.MonthEnd(0) for d in future_dates]
+
+        forecast_df = pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
+
+        return forecast_df
+
+    def predict_pd(self, horizon: int = 1) -> pd.DataFrame:
+        """
+        Predicts Probability of Default (PD) for portfolio assets based on macro forecasts.
+        If horizon is negative, performs a backtest for the last abs(horizon) months.
+
+        Args:
+            horizon (int): Forecasting horizon in months. Positive for future, negative for backtest.
+
+        Returns:
+            pd.DataFrame: DataFrame with predicted PD results.
+        """
+        log.info(f"Starting PD prediction for {horizon} months horizon")
+
+        # 1. Forecast Macro Parameters
+        macro_forecast = self.predict_macro_factors(horizon=horizon)
+        if macro_forecast.empty:
+            log.error("Macro forecast failed. Cannot predict PD.")
+            return pd.DataFrame()
+
+        # 2. Prepare PD Data (Monthly)
+        if 'portfolio' not in self.d or 'PD' not in self.d['portfolio'].columns:
+            log.error("Merton PD data not found in portfolio. Run add_merton_pd() first.")
+            return pd.DataFrame()
+
+        pd_daily = self.d['portfolio'][['date', 'ticker', 'PD']]
+        pd_pivot = pd_daily.pivot(index='date', columns='ticker', values='PD')
+        pd_monthly = pd_pivot.resample('ME').last()
+        pd_monthly.index.name = 'date'
+
+        # 3. Align Historical Data for Regression
+        macro_cols = macro_forecast.columns.tolist()
+        macro_hist = (
+            self.d['portfolio'][['date'] + macro_cols]
+            .drop_duplicates('date')
+            .set_index('date')
+            .resample('ME')
+            .mean()
+            .dropna()
+        )
+        macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
+
+        combined_data = pd.concat([pd_monthly, macro_hist], axis=1).dropna()
+
+        # Training data adjustment for backtest
+        if horizon < 0:
+            abs_h = abs(horizon)
+            train_combined = combined_data.iloc[:-abs_h]
+        else:
+            train_combined = combined_data
+
+        if train_combined.empty:
+            log.error("Combined historical data is empty. Training failed.")
+            return pd.DataFrame()
+
+        tickers = pd_monthly.columns
+        predictions = {}
+
+        # 4. Train OLS and Predict for each ticker
+        for ticker in tickers:
+            if ticker not in train_combined.columns:
+                continue
+
+            Y = train_combined[ticker]
+            X = train_combined[macro_cols]
+            X = sm.add_constant(X)
+
+            model = sm.OLS(Y, X).fit()
+
+            X_pred = macro_forecast.copy()
+            X_pred = sm.add_constant(X_pred, has_constant='add')
+            if 'const' not in X_pred.columns:
+                X_pred['const'] = 1.0
+
+            # Predict
+            y_pred = model.predict(X_pred)
+            predictions[ticker] = y_pred.iloc[-1]
+
+        # 5. Format Results
+        result_df = pd.DataFrame.from_dict(predictions, orient='index', columns=['predicted_pd'])
+        result_df.index.name = 'ticker'
+
+        # Add "Historical" PD for comparison
+        target_date = macro_forecast.index[-1]
+        if target_date in pd_monthly.index:
+            comparison_pd = pd_monthly.loc[target_date]
+        else:
+            comparison_pd = pd_pivot.ffill().iloc[-1]
+
+        result_df['reference_pd'] = comparison_pd
+        result_df['delta'] = result_df['predicted_pd'] - result_df['reference_pd']
+        # Bind PD [0, 1]
+        result_df['predicted_pd'] = result_df['predicted_pd'].clip(0, 1)
+
+        log.info("PD prediction completed")
+        return result_df
+
 
     def calc_macro_connections(
         self, min_samples: int = 10, n_bootstraps: int = 500, conf_level: int = 95
@@ -768,6 +933,44 @@ class Portfolio:
         self.d['macro_connection_summary'] = result_df
         log.info("Macro connection summary calculated.")
 
+        return self
+
+    def plot_macro_forecast(self, horizon: int = 1, tail: int = 12, verbose: bool = False, figsize: tuple = (12, 8)):
+        """
+        Plots historical and forecasted values for macro parameters.
+
+        Args:
+            horizon (int): Forecasting horizon.
+            tail (int): Number of last months of history to show on graph. Defaults to 12.
+            verbose (bool): Whether to show the plot.
+            figsize (tuple): Figure size.
+        """
+        # Get historical data
+        macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
+        existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
+
+        if not existing_cols:
+            log.warning("No macro columns found in portfolio.")
+            return self
+
+        macro_df = (
+            self.d['portfolio'][['date'] + existing_cols]
+            .drop_duplicates('date')
+            .set_index('date')
+            .resample('ME')
+            .mean()
+            .dropna()
+        )
+        macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
+
+        # Get forecast
+        forecast_df = self.predict_macro_factors(horizon=horizon)
+
+        if forecast_df.empty:
+            log.error("Failed to generate macro forecast for plotting.")
+            return self
+
+        plots.plot_macro_forecast(macro_df, forecast_df, tail=tail, figsize=figsize, verbose=verbose)
         return self
 
     def plot_pd_by_tickers(
