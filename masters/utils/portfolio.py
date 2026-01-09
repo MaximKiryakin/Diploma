@@ -706,11 +706,6 @@ class Portfolio:
             return pd.DataFrame(forecast_results, index=future_dates)
 
         if model_type.lower() == 'prophet':
-            import logging
-            # Completely silence cmdstanpy and fbprophet
-            logging.getLogger('cmdstanpy').addHandler(logging.NullHandler())
-            logging.getLogger('cmdstanpy').propagate = False
-            logging.getLogger('cmdstanpy').setLevel(logging.CRITICAL)
 
             forecast_results = {}
             for col in macro_df.columns:
@@ -747,31 +742,18 @@ class Portfolio:
         if horizon < 0:
             training_offset = abs(horizon)
             horizon = abs(horizon)
-            log.info(f"Negative horizon detected: performing backtest for {horizon} months.")
 
-        log.info(f"Starting PD prediction (horizon={horizon}, model={model_type})")
-
-        # 1. Forecast Macro Parameters
         macro_forecast = self.predict_macro_factors(
             horizon=horizon,
             training_offset=training_offset,
             model_type=model_type
         )
-        if macro_forecast.empty:
-            log.error("Macro forecast failed. Cannot predict PD.")
-            return self
-
-        # 2. Prepare PD Data (Monthly)
-        if 'portfolio' not in self.d or 'PD' not in self.d['portfolio'].columns:
-            log.error("Merton PD data not found in portfolio. Run add_merton_pd() first.")
-            return self
 
         pd_daily = self.d['portfolio'][['date', 'ticker', 'PD']]
         pd_pivot = pd_daily.pivot(index='date', columns='ticker', values='PD')
         pd_monthly = pd_pivot.resample('ME').last()
-        pd_monthly.index.name = 'date'
+        pd_monthly.index = pd_monthly.index.normalize() + pd.offsets.MonthEnd(0)
 
-        # 3. Align Historical Data for Regression
         macro_cols = macro_forecast.columns.tolist()
         macro_hist = (
             self.d['portfolio'][['date'] + macro_cols]
@@ -784,98 +766,71 @@ class Portfolio:
         macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
 
         combined_data = pd.concat([pd_monthly, macro_hist], axis=1).dropna()
+        train_combined = combined_data.iloc[:-training_offset] if training_offset > 0 else combined_data
 
-        # Training data adjustment for backtest
-        if training_offset > 0:
-            train_combined = combined_data.iloc[:-training_offset]
-        else:
-            train_combined = combined_data
-
-        if train_combined.empty:
-            log.error("Combined historical data is empty. Training failed.")
-            return self
-
-        tickers = pd_monthly.columns
         predictions = {}
-
-        # 4. Train OLS and Predict for each ticker
-        for ticker in tickers:
+        for ticker in pd_monthly.columns:
             if ticker not in train_combined.columns:
                 continue
 
-            Y = train_combined[ticker]
-            X = train_combined[macro_cols]
-            X = sm.add_constant(X)
+            y = train_combined[ticker]
+            x = sm.add_constant(train_combined[macro_cols])
+            model = sm.OLS(y, x).fit()
 
-            model = sm.OLS(Y, X).fit()
+            x_pred = sm.add_constant(macro_forecast, has_constant='add')
+            if 'const' not in x_pred.columns:
+                x_pred['const'] = 1.0
 
-            X_pred = macro_forecast.copy()
-            X_pred = sm.add_constant(X_pred, has_constant='add')
-            if 'const' not in X_pred.columns:
-                X_pred['const'] = 1.0
+            y_pred = model.predict(x_pred)
+            predictions[ticker] = y_pred.iloc[-1]
 
-            # Predict
-            y_pred = model.predict(X_pred)
-            predictions[ticker] = y_pred.iloc[-1] # Take the last predicted month
-
-        # 5. Format Results
         result_df = pd.DataFrame.from_dict(predictions, orient='index', columns=['predicted_pd'])
         result_df.index.name = 'ticker'
 
-        # Add "Historical" PD for comparison
         target_date = macro_forecast.index[-1]
-        if target_date in pd_monthly.index:
-            comparison_pd = pd_monthly.loc[target_date]
-        else:
-            comparison_pd = pd_pivot.ffill().iloc[-1]
+        comparison_pd = pd_monthly.loc[target_date] if target_date in pd_monthly.index else pd_pivot.ffill().iloc[-1]
 
         result_df['reference_pd'] = comparison_pd
         result_df['delta'] = result_df['predicted_pd'] - result_df['reference_pd']
         result_df['predicted_pd'] = result_df['predicted_pd'].clip(0, 1)
+        result_df['model'] = model_type
 
         self.d['pd_forecast'] = result_df
-        log.info("PD prediction completed")
         return self
 
-    def backtest_pd(self, n_months: int = 12, model_type: str = 'var') -> "Portfolio":
+    def backtest_pd(
+        self, 
+        n_months: int = 12, 
+        models: List[str] = None
+    ) -> "Portfolio":
         """
-        Performs backtesting using an expanding window approach.
-        In each step, trains on all data up to T-offset and predicts for T-offset+1.
+        Performs backtesting of PD predictions across multiple macro models.
 
         Args:
-            n_months (int): Number of months to backtest. Defaults to 12.
-            model_type (str): Type of macro model to use.
+            n_months (int): Number of months for the backtest window.
+            models (List[str], optional): List of models to test. Defaults to ['var'].
 
         Returns:
-            Portfolio: Self with results stored in self.d['pd_backtest'].
+            Portfolio: Self with backtest results in self.d['pd_backtest'].
         """
-        log.info(f"Starting expanding window backtest ({model_type}) for {n_months} months")
+        if models is None:
+            models = ['var']
 
-        results_list = []
+        all_results = []
+        for m_type in models:
+            log.info(f"Backtesting PD using {m_type} model...")
+            for offset in range(n_months, 0, -1):
+                self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
+                
+                # Get the date being predicted for labeling
+                macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
+                target_date = macro_fc.index[-1]
+                
+                res = self.d['pd_forecast'].copy().reset_index()
+                res['date'] = target_date
+                all_results.append(res)
 
-        # We want to predict months from (T - n_months + 1) to (T)
-        # Offset n_months: train on T-n_months, predict T-n_months + 1 (horizon=1)
-        for offset in range(n_months, 0, -1):
-            # training_offset = offset hides last 'offset' months
-            # predict_pd(horizon=1) predicts the very next month after training ends
-            self.predict_pd(horizon=1, training_offset=offset, model_type=model_type)
-
-            iter_res = self.d['pd_forecast'].copy()
-
-            # Identify the target date (the month predicted)
-            macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=model_type)
-            target_date = macro_fc.index[-1]
-
-            iter_res['date'] = target_date
-            results_list.append(iter_res.reset_index())
-
-        if results_list:
-            backtest_df = pd.concat(results_list, ignore_index=True)
-            self.d['pd_backtest'] = backtest_df
-            log.info("Expanding window backtest completed")
-        else:
-            log.warning("Backtest produced no results")
-
+        self.d['pd_backtest'] = pd.concat(all_results, ignore_index=True)
         return self
 
     def plot_macro_forecast(
@@ -885,10 +840,10 @@ class Portfolio:
         models: Union[str, list] = 'var',
         tail: int = 12,
         verbose: bool = False,
-        figsize: tuple = (12, 10)
+        figsize: tuple = (12, 14)
     ):
         """
-        Plots historical and forecasted values for macro parameters for multiple models.
+        Plots historical and forecasted values for macro parameters and Portfolio PD.
 
         Args:
             horizon (int): Forecasting horizon.
@@ -908,17 +863,18 @@ class Portfolio:
         else:
             log.info(f"Visualizing Multi-step forecast for {horizon} months")
 
-        # Get historical data
+        # Get historical data including Portfolio PD
         macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
-        #existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
-
+        
+        # Calculate daily portfolio PD
+        port_pd = self.d['portfolio'].groupby('date')['PD'].mean().reset_index()
+        
         macro_df = (
             self.d['portfolio'][['date'] + macro_cols]
             .drop_duplicates('date')
+            .merge(port_pd, on='date', how='left')
             .set_index('date')
-            .resample('ME')
-            .mean()
-            .dropna()
+            .resample('ME').mean().dropna()
         )
         macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
 
@@ -930,7 +886,13 @@ class Portfolio:
                 # WALK-FORWARD: predict each month one by one
                 step_fcs = []
                 for offset in range(n_months, 0, -1):
+                    # Macro step
                     fc_step = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
+                    
+                    # PD step
+                    self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
+                    fc_step['PD'] = self.d['pd_forecast']['predicted_pd'].mean()
+                    
                     step_fcs.append(fc_step)
 
                 forecast_dfs[m_type] = pd.concat(step_fcs)
@@ -938,6 +900,16 @@ class Portfolio:
             else:
                 # NORMAL: multi-step forecast
                 fc_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset, model_type=m_type)
+                
+                # For simplicity in multi-step plot, we'll only show PD if we can predict it for all steps
+                # Let's run a loop for PD if horizon > 1
+                pd_trajectory = []
+                for i in range(1, horizon + 1):
+                    # This is slightly inefficient but ensures consistency
+                    self.predict_pd(horizon=i, training_offset=training_offset, model_type=m_type)
+                    pd_trajectory.append(self.d['pd_forecast']['predicted_pd'].mean())
+                
+                fc_df['PD'] = pd_trajectory
                 forecast_dfs[m_type] = fc_df
 
         plots.plot_macro_forecast(

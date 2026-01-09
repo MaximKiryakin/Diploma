@@ -416,10 +416,10 @@ def plot_macro_forecast(
     verbose: bool = False,
 ):
     """
-    Plots historical and forecasted values for macro parameters from multiple models.
+    Plots historical and forecasted values for macro parameters and Portfolio PD.
 
     Args:
-        macro_df (pd.DataFrame): Historical macro data.
+        macro_df (pd.DataFrame): Historical macro data (including PD).
         forecast_dfs (dict): Dictionary mapping model labels to forecast DataFrames.
         tail (int): Number of last months to show.
         figsize (tuple): Figure size.
@@ -437,26 +437,39 @@ def plot_macro_forecast(
 
     for i, factor in enumerate(factors):
         ax = axes[i]
+        is_pd = factor == 'PD'
 
-        # Plot Macro factor
+        # Plot Historical data
         plot_df = macro_df.tail(tail) if tail > 0 else macro_df
-        ax.plot(plot_df.index, plot_df[factor], label="Fact", color="royalblue", linewidth=2.5)
+        
+        # Scale PD to percentages for better readability
+        fact_vals = plot_df[factor] * 100 if is_pd else plot_df[factor]
+        ax.plot(plot_df.index, fact_vals, label="Fact", color="royalblue", linewidth=2.5)
 
         for idx, (label, forecast_df) in enumerate(forecast_dfs.items()):
+            if factor not in forecast_df.columns:
+                continue
+                
             color = colors[idx % len(colors)]
             first_fc_date = forecast_df.index[0]
             history_before_fc = macro_df[macro_df.index < first_fc_date]
+            
+            # Scale Forecasts
+            fc_vals_raw = list(forecast_df[factor])
+            fc_vals_scaled = [v * 100 for v in fc_vals_raw] if is_pd else fc_vals_raw
 
             if not history_before_fc.empty:
                 fc_dates = [history_before_fc.index[-1]] + list(forecast_df.index)
-                fc_vals = [history_before_fc[factor].iloc[-1]] + list(forecast_df[factor])
+                hist_val = history_before_fc[factor].iloc[-1]
+                fc_vals = [hist_val * 100 if is_pd else hist_val] + fc_vals_scaled
             else:
-                fc_dates, fc_vals = list(forecast_df.index), list(forecast_df[factor])
+                fc_dates, fc_vals = list(forecast_df.index), fc_vals_scaled
 
             ax.plot(fc_dates, fc_vals, label=f"FC: {label}", color=color, linestyle="--", linewidth=1.5)
-            ax.scatter(forecast_df.index, forecast_df[factor], color=color, s=20)
+            ax.scatter(forecast_df.index, fc_vals_scaled, color=color, s=20)
 
-        ax.set_title(f"Macro Factor: {factor}", fontsize=12)
+        title = "Portfolio Average PD (%)" if is_pd else f"Macro Factor: {factor}"
+        ax.set_title(title, fontsize=12, fontweight='bold' if is_pd else 'normal')
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
@@ -465,7 +478,7 @@ def plot_macro_forecast(
     plt.xticks(rotation=90)
     plt.tight_layout()
 
-    save_path = "logs/graphs/macro_comparison.png"
+    save_path = "logs/graphs/macro_pd_comparison.png"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
 
