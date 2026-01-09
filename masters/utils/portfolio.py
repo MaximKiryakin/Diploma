@@ -632,17 +632,17 @@ class Portfolio:
 
         return self
 
-    def predict_macro_factors(self, horizon: int = 1) -> pd.DataFrame:
+    def predict_macro_factors(self, horizon: int = 1, training_offset: int = 0) -> pd.DataFrame:
         """
-        Predicts macroeconomic factors for a specified horizon using a VAR model.
-        Uses data from the existing portfolio dataframe.
-        Supports negative horizon for backtesting (e.g. -1 predicts the last known month).
+        Predicts macroeconomic factors.
 
         Args:
-            horizon (int): Number of months to predict. Positive for future, negative for backtest.
+            horizon (int): Number of months to predict into the future from the end of training data.
+            training_offset (int): Number of months to exclude from the end of history before training.
+                                 Used for backtesting.
 
         Returns:
-            pd.DataFrame: DataFrame containing forecasted macro variables.
+            pd.DataFrame: Forecasted macro variables.
         """
         if 'portfolio' not in self.d or self.d['portfolio'] is None:
             log.error("Portfolio not created. Cannot predict macro factors.")
@@ -665,14 +665,13 @@ class Portfolio:
             .dropna()
         )
 
-        steps = abs(horizon)
-        if horizon > 0:
-            macro_df = macro_df_full
-        else:
-            if len(macro_df_full) <= steps:
-                log.error(f"Not enough macro data for backtest of {steps} steps.")
+        if training_offset > 0:
+            if len(macro_df_full) <= training_offset:
+                log.error(f"Not enough macro data for training offset of {training_offset} steps.")
                 return pd.DataFrame()
-            macro_df = macro_df_full.iloc[:-steps]
+            macro_df = macro_df_full.iloc[:-training_offset]
+        else:
+            macro_df = macro_df_full
 
         if macro_df.empty:
             log.warning("Prepared macro data is empty.")
@@ -689,40 +688,40 @@ class Portfolio:
         # Forecast
         lag_order = results.k_ar
         forecast_input = macro_df.values[-lag_order:]
-        fc = results.forecast(y=forecast_input, steps=steps)
+        fc = results.forecast(y=forecast_input, steps=horizon)
 
         # Generate future dates starting from the end of training data
         last_date = macro_df.index[-1]
-        future_dates = [last_date + pd.DateOffset(months=i+1) for i in range(steps)]
+        future_dates = [last_date + pd.DateOffset(months=i+1) for i in range(horizon)]
         future_dates = [pd.Timestamp(d).normalize() + pd.offsets.MonthEnd(0) for d in future_dates]
 
         forecast_df = pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
 
         return forecast_df
 
-    def predict_pd(self, horizon: int = 1) -> pd.DataFrame:
+    def predict_pd(self, horizon: int = 1, training_offset: int = 0) -> "Portfolio":
         """
         Predicts Probability of Default (PD) for portfolio assets based on macro forecasts.
-        If horizon is negative, performs a backtest for the last abs(horizon) months.
 
         Args:
-            horizon (int): Forecasting horizon in months. Positive for future, negative for backtest.
+            horizon (int): Forecasting horizon in months.
+            training_offset (int): Months of history to hide for backtesting.
 
         Returns:
-            pd.DataFrame: DataFrame with predicted PD results.
+            Portfolio: Self with results stored in self.d['pd_forecast'].
         """
-        log.info(f"Starting PD prediction for {horizon} months horizon")
+        log.info(f"Starting PD prediction (horizon={horizon}, offset={training_offset})")
 
         # 1. Forecast Macro Parameters
-        macro_forecast = self.predict_macro_factors(horizon=horizon)
+        macro_forecast = self.predict_macro_factors(horizon=horizon, training_offset=training_offset)
         if macro_forecast.empty:
             log.error("Macro forecast failed. Cannot predict PD.")
-            return pd.DataFrame()
+            return self
 
         # 2. Prepare PD Data (Monthly)
         if 'portfolio' not in self.d or 'PD' not in self.d['portfolio'].columns:
             log.error("Merton PD data not found in portfolio. Run add_merton_pd() first.")
-            return pd.DataFrame()
+            return self
 
         pd_daily = self.d['portfolio'][['date', 'ticker', 'PD']]
         pd_pivot = pd_daily.pivot(index='date', columns='ticker', values='PD')
@@ -744,15 +743,14 @@ class Portfolio:
         combined_data = pd.concat([pd_monthly, macro_hist], axis=1).dropna()
 
         # Training data adjustment for backtest
-        if horizon < 0:
-            abs_h = abs(horizon)
-            train_combined = combined_data.iloc[:-abs_h]
+        if training_offset > 0:
+            train_combined = combined_data.iloc[:-training_offset]
         else:
             train_combined = combined_data
 
         if train_combined.empty:
             log.error("Combined historical data is empty. Training failed.")
-            return pd.DataFrame()
+            return self
 
         tickers = pd_monthly.columns
         predictions = {}
@@ -775,7 +773,7 @@ class Portfolio:
 
             # Predict
             y_pred = model.predict(X_pred)
-            predictions[ticker] = y_pred.iloc[-1]
+            predictions[ticker] = y_pred.iloc[-1] # Take the last predicted month
 
         # 5. Format Results
         result_df = pd.DataFrame.from_dict(predictions, orient='index', columns=['predicted_pd'])
@@ -790,11 +788,51 @@ class Portfolio:
 
         result_df['reference_pd'] = comparison_pd
         result_df['delta'] = result_df['predicted_pd'] - result_df['reference_pd']
-        # Bind PD [0, 1]
         result_df['predicted_pd'] = result_df['predicted_pd'].clip(0, 1)
 
+        self.d['pd_forecast'] = result_df
         log.info("PD prediction completed")
-        return result_df
+        return self
+
+    def backtest_pd(self, n_months: int = 12) -> "Portfolio":
+        """
+        Performs backtesting using an expanding window approach.
+        In each step, trains on all data up to T-offset and predicts for T-offset+1.
+
+        Args:
+            n_months (int): Number of months to backtest. Defaults to 12.
+
+        Returns:
+            Portfolio: Self with results stored in self.d['pd_backtest'].
+        """
+        log.info(f"Starting expanding window backtest for {n_months} months")
+
+        results_list = []
+
+        # We want to predict months from (T - n_months + 1) to (T)
+        # Offset n_months: train on T-n_months, predict T-n_months + 1 (horizon=1)
+        for offset in range(n_months, 0, -1):
+            # training_offset = offset hides last 'offset' months
+            # predict_pd(horizon=1) predicts the very next month after training ends
+            self.predict_pd(horizon=1, training_offset=offset)
+
+            iter_res = self.d['pd_forecast'].copy()
+
+            # Identify the target date (the month predicted)
+            macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset)
+            target_date = macro_fc.index[-1]
+
+            iter_res['date'] = target_date
+            results_list.append(iter_res.reset_index())
+
+        if results_list:
+            backtest_df = pd.concat(results_list, ignore_index=True)
+            self.d['pd_backtest'] = backtest_df
+            log.info("Expanding window backtest completed")
+        else:
+            log.warning("Backtest produced no results")
+
+        return self
 
 
     def calc_macro_connections(
@@ -935,12 +973,13 @@ class Portfolio:
 
         return self
 
-    def plot_macro_forecast(self, horizon: int = 1, tail: int = 12, verbose: bool = False, figsize: tuple = (12, 8)):
+    def plot_macro_forecast(self, horizon: int = 1, training_offset: int = 0, tail: int = 12, verbose: bool = False, figsize: tuple = (12, 8)):
         """
         Plots historical and forecasted values for macro parameters.
 
         Args:
             horizon (int): Forecasting horizon.
+            training_offset (int): Offset for backtesting visualization.
             tail (int): Number of last months of history to show on graph. Defaults to 12.
             verbose (bool): Whether to show the plot.
             figsize (tuple): Figure size.
@@ -964,7 +1003,7 @@ class Portfolio:
         macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
 
         # Get forecast
-        forecast_df = self.predict_macro_factors(horizon=horizon)
+        forecast_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset)
 
         if forecast_df.empty:
             log.error("Failed to generate macro forecast for plotting.")

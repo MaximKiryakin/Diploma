@@ -461,8 +461,11 @@ def plot_macro_forecast(
         ax.legend()
         ax.grid(True, alpha=0.3)
 
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+
     plt.xlabel("Date", fontsize=10)
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=90)
     plt.tight_layout()
 
     save_path = "logs/graphs/macro_forecast.png"
