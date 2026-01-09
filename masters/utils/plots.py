@@ -338,6 +338,68 @@ def plot_debt_capitalization(
     if save_path:
         log.info(f"Capitalization-debt graphs saved: {save_path}")
 
+def plot_ticker_dashboards_grid(
+    portfolio_df: pd.DataFrame,
+    tickers: list,
+    figsize_row: tuple = (20, 5),
+    verbose: bool = False
+):
+    """
+    Plots a multi-panel dashboard for each ticker.
+    One row per ticker: [Merton PD] | [Stock Price] | [Debt vs Assets]
+    """
+    n_tickers = len(tickers)
+    fig, axes = plt.subplots(n_tickers, 3, figsize=(figsize_row[0], figsize_row[1] * n_tickers))
+
+    # Handle single ticker case (axes becomes 1D)
+    if n_tickers == 1:
+        axes = np.expand_dims(axes, axis=0)
+
+    for i, ticker in enumerate(tickers):
+        data = portfolio_df.query(f"ticker == '{ticker}'").sort_values("date")
+        if data.empty:
+            continue
+
+        # 1. Merton PD (Column 0)
+        ax_pd = axes[i, 0]
+        ax_pd.plot(data["date"], data["PD"] * 100, color="crimson", linewidth=2)
+        ax_pd.set_title(f"{ticker}: PD (%)", fontsize=12, pad=10)
+        ax_pd.set_ylabel("PD, %")
+        ax_pd.grid(True, alpha=0.3)
+
+        # 2. Stock Price (Column 1)
+        ax_stock = axes[i, 1]
+        ax_stock.plot(data["date"], data["close"], color="royalblue", linewidth=2)
+        ax_stock.set_title(f"{ticker}: Stock Price", fontsize=12, pad=10)
+        ax_stock.set_ylabel("Price, RUB")
+        ax_stock.grid(True, alpha=0.3)
+
+        # 3. Debt vs Assets (Column 2)
+        ax_debt = axes[i, 2]
+        ax_debt.plot(data["date"], data["capitalization"], color="#2ecc71", label="Cap", linewidth=2)
+        ax_debt.plot(data["date"], data["debt"], color="#e74c3c", label="Debt", linewidth=2)
+        ax_debt.set_title(f"{ticker}: Cap vs Debt", fontsize=12, pad=10)
+        ax_debt.set_ylabel("Value, RUB")
+        ax_debt.legend(fontsize=8)
+        ax_debt.grid(True, alpha=0.3)
+
+        # Apply common date formatting to all 3 axes in the row
+        for ax in axes[i]:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+            ax.tick_params(axis='x', rotation=90)
+
+    plt.tight_layout()
+    save_path = "logs/graphs/ticker_dashboards.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+
 def plot_macro_significance(
     macro_connection_summary: pd.DataFrame,
     save_path: str = "logs/graphs/macro_significance_summary.png",
@@ -441,7 +503,7 @@ def plot_macro_forecast(
 
         # Plot Historical data
         plot_df = macro_df.tail(tail) if tail > 0 else macro_df
-        
+
         # Scale PD to percentages for better readability
         fact_vals = plot_df[factor] * 100 if is_pd else plot_df[factor]
         ax.plot(plot_df.index, fact_vals, label="Fact", color="royalblue", linewidth=2.5)
@@ -449,11 +511,11 @@ def plot_macro_forecast(
         for idx, (label, forecast_df) in enumerate(forecast_dfs.items()):
             if factor not in forecast_df.columns:
                 continue
-                
+
             color = colors[idx % len(colors)]
             first_fc_date = forecast_df.index[0]
             history_before_fc = macro_df[macro_df.index < first_fc_date]
-            
+
             # Scale Forecasts
             fc_vals_raw = list(forecast_df[factor])
             fc_vals_scaled = [v * 100 for v in fc_vals_raw] if is_pd else fc_vals_raw

@@ -444,6 +444,11 @@ class Portfolio:
                 if self.d['portfolio'][col].dtype == 'object':
                     self.d['portfolio'][col] = self.d['portfolio'][col].str.replace(" ", "", regex=False)
                 self.d['portfolio'][col] = pd.to_numeric(self.d['portfolio'][col], errors="coerce")
+
+                # Handle zero-values as missing data to avoid ffill issues and PD spikes
+                if col in ["Капитализация, млрд руб", "Долг, млрд руб"]:
+                    self.d['portfolio'][col] = self.d['portfolio'][col].replace(0, np.nan)
+
                 if "млрд руб" in col:
                     self.d['portfolio'][col] *= 1e9
 
@@ -634,6 +639,7 @@ class Portfolio:
 
         return self
 
+
     def predict_macro_factors(
         self,
         horizon: int = 1,
@@ -656,6 +662,7 @@ class Portfolio:
             horizon = abs(horizon)
 
         macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
+
         macro_df = (
             self.d['portfolio'][['date'] + macro_cols]
             .drop_duplicates('date')
@@ -799,8 +806,8 @@ class Portfolio:
         return self
 
     def backtest_pd(
-        self, 
-        n_months: int = 12, 
+        self,
+        n_months: int = 12,
         models: List[str] = None
     ) -> "Portfolio":
         """
@@ -821,11 +828,11 @@ class Portfolio:
             log.info(f"Backtesting PD using {m_type} model...")
             for offset in range(n_months, 0, -1):
                 self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
-                
+
                 # Get the date being predicted for labeling
                 macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
                 target_date = macro_fc.index[-1]
-                
+
                 res = self.d['pd_forecast'].copy().reset_index()
                 res['date'] = target_date
                 all_results.append(res)
@@ -865,10 +872,10 @@ class Portfolio:
 
         # Get historical data including Portfolio PD
         macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
-        
+
         # Calculate daily portfolio PD
         port_pd = self.d['portfolio'].groupby('date')['PD'].mean().reset_index()
-        
+
         macro_df = (
             self.d['portfolio'][['date'] + macro_cols]
             .drop_duplicates('date')
@@ -888,11 +895,11 @@ class Portfolio:
                 for offset in range(n_months, 0, -1):
                     # Macro step
                     fc_step = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
-                    
+
                     # PD step
                     self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
                     fc_step['PD'] = self.d['pd_forecast']['predicted_pd'].mean()
-                    
+
                     step_fcs.append(fc_step)
 
                 forecast_dfs[m_type] = pd.concat(step_fcs)
@@ -900,7 +907,7 @@ class Portfolio:
             else:
                 # NORMAL: multi-step forecast
                 fc_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset, model_type=m_type)
-                
+
                 # For simplicity in multi-step plot, we'll only show PD if we can predict it for all steps
                 # Let's run a loop for PD if horizon > 1
                 pd_trajectory = []
@@ -908,7 +915,7 @@ class Portfolio:
                     # This is slightly inefficient but ensures consistency
                     self.predict_pd(horizon=i, training_offset=training_offset, model_type=m_type)
                     pd_trajectory.append(self.d['pd_forecast']['predicted_pd'].mean())
-                
+
                 fc_df['PD'] = pd_trajectory
                 forecast_dfs[m_type] = fc_df
 
@@ -937,6 +944,28 @@ class Portfolio:
             return self
 
         plots.plot_pd_forecast(self.d['pd_forecast'], figsize=figsize, verbose=verbose)
+        return self
+
+    def plot_ticker_dashboards(
+        self,
+        tickers: list,
+        figsize_row: tuple = (18, 5),
+        verbose: bool = False
+    ) -> "Portfolio":
+        """
+        Plots Stock, PD and Cap/Debt dashboards for each ticker in a grid.
+
+        Args:
+            tickers (list): List of tickers to plot.
+            figsize_row (tuple): Size of one ticker row (3 subplots).
+            verbose (bool): Whether to show the plot.
+        """
+        plots.plot_ticker_dashboards_grid(
+            self.d['portfolio'],
+            tickers,
+            figsize_row=figsize_row,
+            verbose=verbose
+        )
         return self
 
     def plot_pd_by_tickers(
