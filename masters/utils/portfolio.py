@@ -12,6 +12,8 @@ from typing import List, Optional, Tuple, Dict, Union, Callable, Any
 import pickle
 import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from prophet import Prophet
 import os
 from sklearn.utils import resample
 from scipy.optimize import root
@@ -632,88 +634,129 @@ class Portfolio:
 
         return self
 
-    def predict_macro_factors(self, horizon: int = 1, training_offset: int = 0) -> pd.DataFrame:
+    def predict_macro_factors(
+        self,
+        horizon: int = 1,
+        training_offset: int = 0,
+        model_type: str = 'var'
+    ) -> pd.DataFrame:
         """
-        Predicts macroeconomic factors.
+        Predicts macroeconomic factors using specified model type.
 
         Args:
-            horizon (int): Number of months to predict into the future from the end of training data.
-            training_offset (int): Number of months to exclude from the end of history before training.
-                                 Used for backtesting.
+            horizon (int): Number of months to predict.
+            training_offset (int): Months of history to hide.
+            model_type (str): 'var', 'sarimax', or 'prophet'.
 
         Returns:
             pd.DataFrame: Forecasted macro variables.
         """
-        if 'portfolio' not in self.d or self.d['portfolio'] is None:
-            log.error("Portfolio not created. Cannot predict macro factors.")
-            return pd.DataFrame()
+        if horizon < 0:
+            training_offset = abs(horizon)
+            horizon = abs(horizon)
 
         macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
-        existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
-
-        if not existing_cols:
-            log.warning("No macro columns found in portfolio.")
-            return pd.DataFrame()
-
-        # Extract macro data
-        macro_df_full = (
-            self.d['portfolio'][['date'] + existing_cols]
+        macro_df = (
+            self.d['portfolio'][['date'] + macro_cols]
             .drop_duplicates('date')
             .set_index('date')
-            .resample('ME')
-            .mean()
-            .dropna()
+            .resample('ME').mean().dropna()
         )
 
         if training_offset > 0:
-            if len(macro_df_full) <= training_offset:
-                log.error(f"Not enough macro data for training offset of {training_offset} steps.")
-                return pd.DataFrame()
-            macro_df = macro_df_full.iloc[:-training_offset]
-        else:
-            macro_df = macro_df_full
+            macro_df = macro_df.iloc[:-training_offset]
 
-        if macro_df.empty:
-            log.warning("Prepared macro data is empty.")
-            return pd.DataFrame()
+        future_dates = pd.date_range(
+            start=macro_df.index[-1] + pd.offsets.MonthEnd(1),
+            periods=horizon,
+            freq='ME'
+        )
 
-        # Fit VAR model
-        model = VAR(macro_df)
-        max_lags = min(3, len(macro_df) // 2 - 1)
-        if max_lags < 1:
-            max_lags = 1
+        if model_type.lower() == 'var':
+            results = VAR(macro_df).fit(maxlags=max(1, min(3, len(macro_df) // 2 - 1)))
+            fc = results.forecast(y=macro_df.values[-results.k_ar:], steps=horizon)
+            return pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
 
-        results = model.fit(maxlags=max_lags)
+        if model_type.lower() == 'sarimax':
+            forecast_results = {}
+            for col in macro_df.columns:
+                d = 1 if adfuller(macro_df[col])[1] > 0.05 else 0
+                exog_train = macro_df.drop(columns=[col]).shift(1).bfill()
 
-        # Forecast
-        lag_order = results.k_ar
-        forecast_input = macro_df.values[-lag_order:]
-        fc = results.forecast(y=forecast_input, steps=horizon)
+                # Scaling is crucial because macro variables (e.g. rubusd ~100 vs inflation ~0.1)
+                # have different scales, which breaks MLE optimization.
+                sy, sx = StandardScaler(), StandardScaler()
+                y_scaled = sy.fit_transform(macro_df[[col]])
+                x_scaled = sx.fit_transform(exog_train)
 
-        # Generate future dates starting from the end of training data
-        last_date = macro_df.index[-1]
-        future_dates = [last_date + pd.DateOffset(months=i+1) for i in range(horizon)]
-        future_dates = [pd.Timestamp(d).normalize() + pd.offsets.MonthEnd(0) for d in future_dates]
+                # Using (1, d, 0) for better stability on small datasets, and default optimizer
+                results = SARIMAX(
+                    y_scaled, exog=x_scaled, order=(1, d, 0),
+                    enforce_stationarity=False, enforce_invertibility=False
+                ).fit(disp=False, maxiter=500)
 
-        forecast_df = pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
+                exog_fc = pd.DataFrame(
+                    [macro_df.drop(columns=[col]).iloc[-1]] * horizon,
+                    columns=exog_train.columns
+                )
+                exog_fc_scaled = sx.transform(exog_fc)
 
-        return forecast_df
+                fc_scaled = results.forecast(steps=horizon, exog=exog_fc_scaled)
+                forecast_results[col] = sy.inverse_transform(fc_scaled.reshape(-1, 1)).flatten()
+            return pd.DataFrame(forecast_results, index=future_dates)
 
-    def predict_pd(self, horizon: int = 1, training_offset: int = 0) -> "Portfolio":
+        if model_type.lower() == 'prophet':
+            import logging
+            # Completely silence cmdstanpy and fbprophet
+            logging.getLogger('cmdstanpy').addHandler(logging.NullHandler())
+            logging.getLogger('cmdstanpy').propagate = False
+            logging.getLogger('cmdstanpy').setLevel(logging.CRITICAL)
+
+            forecast_results = {}
+            for col in macro_df.columns:
+                m = Prophet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                    changepoint_prior_scale=0.05
+                )
+                m.fit(macro_df[[col]].reset_index().rename(columns={'date': 'ds', col: 'y'}))
+                future = m.make_future_dataframe(periods=horizon, freq='ME')
+                forecast_results[col] = m.predict(future)['yhat'].tail(horizon).values
+            return pd.DataFrame(forecast_results, index=future_dates)
+
+        return pd.DataFrame()
+
+    def predict_pd(
+        self,
+        horizon: int = 1,
+        training_offset: int = 0,
+        model_type: str = 'var'
+    ) -> "Portfolio":
         """
         Predicts Probability of Default (PD) for portfolio assets based on macro forecasts.
 
         Args:
             horizon (int): Forecasting horizon in months.
             training_offset (int): Months of history to hide for backtesting.
+            model_type (str): Type of macro model to use.
 
         Returns:
             Portfolio: Self with results stored in self.d['pd_forecast'].
         """
-        log.info(f"Starting PD prediction (horizon={horizon}, offset={training_offset})")
+        if horizon < 0:
+            training_offset = abs(horizon)
+            horizon = abs(horizon)
+            log.info(f"Negative horizon detected: performing backtest for {horizon} months.")
+
+        log.info(f"Starting PD prediction (horizon={horizon}, model={model_type})")
 
         # 1. Forecast Macro Parameters
-        macro_forecast = self.predict_macro_factors(horizon=horizon, training_offset=training_offset)
+        macro_forecast = self.predict_macro_factors(
+            horizon=horizon,
+            training_offset=training_offset,
+            model_type=model_type
+        )
         if macro_forecast.empty:
             log.error("Macro forecast failed. Cannot predict PD.")
             return self
@@ -794,18 +837,19 @@ class Portfolio:
         log.info("PD prediction completed")
         return self
 
-    def backtest_pd(self, n_months: int = 12) -> "Portfolio":
+    def backtest_pd(self, n_months: int = 12, model_type: str = 'var') -> "Portfolio":
         """
         Performs backtesting using an expanding window approach.
         In each step, trains on all data up to T-offset and predicts for T-offset+1.
 
         Args:
             n_months (int): Number of months to backtest. Defaults to 12.
+            model_type (str): Type of macro model to use.
 
         Returns:
             Portfolio: Self with results stored in self.d['pd_backtest'].
         """
-        log.info(f"Starting expanding window backtest for {n_months} months")
+        log.info(f"Starting expanding window backtest ({model_type}) for {n_months} months")
 
         results_list = []
 
@@ -814,12 +858,12 @@ class Portfolio:
         for offset in range(n_months, 0, -1):
             # training_offset = offset hides last 'offset' months
             # predict_pd(horizon=1) predicts the very next month after training ends
-            self.predict_pd(horizon=1, training_offset=offset)
+            self.predict_pd(horizon=1, training_offset=offset, model_type=model_type)
 
             iter_res = self.d['pd_forecast'].copy()
 
             # Identify the target date (the month predicted)
-            macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset)
+            macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=model_type)
             target_date = macro_fc.index[-1]
 
             iter_res['date'] = target_date
@@ -834,166 +878,42 @@ class Portfolio:
 
         return self
 
-
-    def calc_macro_connections(
-        self, min_samples: int = 10, n_bootstraps: int = 500, conf_level: int = 95
-    ) -> "Portfolio":
+    def plot_macro_forecast(
+        self,
+        horizon: int = 1,
+        training_offset: int = 0,
+        models: Union[str, list] = 'var',
+        tail: int = 12,
+        verbose: bool = False,
+        figsize: tuple = (12, 10)
+    ):
         """
-        Calculates macroeconomic connections for the given portfolio.
-
-        Args:
-            min_samples (int, optional): Minimum number of samples required for each ticker. Default is 10.
-            n_bootstraps (int, optional): Number of bootstraps for confidence intervals. Default is 500.
-            conf_level (int, optional): Confidence level for confidence intervals. Default is 95.
-
-        Returns:
-            Portfolio: Updated portfolio with calculated macroeconomic connections.
-        """
-
-        df = self.d['portfolio'].copy()
-        targets = ["debt", "capitalization"]
-
-        results = []
-
-        tickers = df["ticker"].unique()
-
-        def format_ci(low, high):
-            return f"[{low:.3f}, {high:.3f}]"
-
-        for ticker in tickers:
-
-            df_ticker = df[df["ticker"] == ticker].copy()
-
-            if len(df_ticker) < min_samples:
-                continue
-
-            for target in targets:
-                record = {
-                    "ticker": ticker,
-                    "target": target,
-                    "best_alpha": np.nan,
-                    "mse_model": np.nan,
-                    "mse_baseline": np.nan,
-                    "r2": np.nan,
-                    "coef_inflation": np.nan,
-                    "coef_inflation_ci": np.nan,
-                    "coef_unemployment": np.nan,
-                    "coef_unemployment_ci": np.nan,
-                    "coef_usd_rub": np.nan,
-                    "coef_usd_rub_ci": np.nan,
-                }
-
-                try:
-                    Q1 = df_ticker[target].quantile(0.05)
-                    Q3 = df_ticker[target].quantile(0.95)
-                    df_target = df_ticker[
-                        (df_ticker[target] >= Q1) & (df_ticker[target] <= Q3)
-                    ].copy()
-
-                    if len(df_target) < 5:
-                        continue
-
-                    y = np.log(df_target[target] + 1e-9)
-                    X = df_target[
-                        ["inflation", "unemployment_rate", "rubusd_exchange_rate"]
-                    ]
-
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X, y, test_size=0.2, random_state=42
-                    )
-
-                    if len(y_test) == 0:
-                        continue
-
-                    scaler = StandardScaler()
-                    X_train_scaled = scaler.fit_transform(X_train)
-                    X_test_scaled = scaler.transform(X_test)
-
-                    y_pred_baseline = np.full_like(y_test, y_train.mean())
-                    mse_baseline = mean_squared_error(y_test, y_pred_baseline)
-
-                    ridge = Ridge()
-                    grid = GridSearchCV(
-                        ridge,
-                        {"alpha": np.logspace(-3, 2, 50)},
-                        cv=5,
-                        scoring="neg_mean_squared_error",
-                    )
-                    grid.fit(X_train_scaled, y_train)
-                    best_model = grid.best_estimator_
-                    y_pred = best_model.predict(X_test_scaled)
-
-                    coefs = []
-                    for _ in range(n_bootstraps):
-                        X_bs, y_bs = resample(X_train_scaled, y_train)
-                        model = Ridge(alpha=grid.best_params_["alpha"])
-                        model.fit(X_bs, y_bs)
-                        coefs.append(model.coef_)
-
-                    alpha = (100 - conf_level) / 2
-                    ci_low, ci_high = alpha, 100 - alpha
-                    coefs = np.array(coefs)
-
-                    low_inf, high_inf = np.percentile(coefs[:, 0], [ci_low, ci_high])
-                    low_unemp, high_unemp = np.percentile(
-                        coefs[:, 1], [ci_low, ci_high]
-                    )
-                    low_usd, high_usd = np.percentile(coefs[:, 2], [ci_low, ci_high])
-
-                    ci_inflation = format_ci(low_inf, high_inf)
-                    ci_unemployment = format_ci(low_unemp, high_unemp)
-                    ci_usd_rub = format_ci(low_usd, high_usd)
-
-                    record.update(
-                        {
-                            "best_alpha": grid.best_params_["alpha"],
-                            "mse_model": mean_squared_error(y_test, y_pred),
-                            "mse_baseline": mse_baseline,
-                            "r2": r2_score(y_test, y_pred),
-                            "coef_inflation": best_model.coef_[0],
-                            "coef_inflation_ci": ci_inflation,
-                            "coef_unemployment": best_model.coef_[1],
-                            "coef_unemployment_ci": ci_unemployment,
-                            "coef_usd_rub": best_model.coef_[2],
-                            "coef_usd_rub_ci": ci_usd_rub,
-                        }
-                    )
-
-                except Exception as e:
-                    log.error(f"Ошибка для {ticker}-{target}: {str(e)}")
-                    continue
-
-                results.append(record)
-
-        result_df = pd.DataFrame(results)
-        result_df = result_df.dropna(subset=["best_alpha"])
-
-        self.d['macro_connection_summary'] = result_df
-        log.info("Macro connection summary calculated.")
-
-        return self
-
-    def plot_macro_forecast(self, horizon: int = 1, training_offset: int = 0, tail: int = 12, verbose: bool = False, figsize: tuple = (12, 8)):
-        """
-        Plots historical and forecasted values for macro parameters.
+        Plots historical and forecasted values for macro parameters for multiple models.
 
         Args:
             horizon (int): Forecasting horizon.
-            training_offset (int): Offset for backtesting visualization.
-            tail (int): Number of last months of history to show on graph. Defaults to 12.
+            training_offset (int): Offset for backtesting.
+            models (str|list): Model types to compare.
+            tail (int): History months to show.
             verbose (bool): Whether to show the plot.
             figsize (tuple): Figure size.
         """
+        if isinstance(models, str):
+            models = [models]
+
+        is_backtest = horizon < 0
+        if is_backtest:
+            n_months = abs(horizon)
+            log.info(f"Visualizing Expanding Window backtest for last {n_months} months")
+        else:
+            log.info(f"Visualizing Multi-step forecast for {horizon} months")
+
         # Get historical data
         macro_cols = ['inflation', 'interest_rate', 'unemployment_rate', 'rubusd_exchange_rate']
-        existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
-
-        if not existing_cols:
-            log.warning("No macro columns found in portfolio.")
-            return self
+        #existing_cols = [col for col in macro_cols if col in self.d['portfolio'].columns]
 
         macro_df = (
-            self.d['portfolio'][['date'] + existing_cols]
+            self.d['portfolio'][['date'] + macro_cols]
             .drop_duplicates('date')
             .set_index('date')
             .resample('ME')
@@ -1002,14 +922,49 @@ class Portfolio:
         )
         macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
 
-        # Get forecast
-        forecast_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset)
+        # Collect forecasts from all specified models
+        forecast_dfs = {}
 
-        if forecast_df.empty:
-            log.error("Failed to generate macro forecast for plotting.")
+        for m_type in models:
+            if is_backtest:
+                # WALK-FORWARD: predict each month one by one
+                step_fcs = []
+                for offset in range(n_months, 0, -1):
+                    fc_step = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
+                    step_fcs.append(fc_step)
+
+                forecast_dfs[m_type] = pd.concat(step_fcs)
+
+            else:
+                # NORMAL: multi-step forecast
+                fc_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset, model_type=m_type)
+                forecast_dfs[m_type] = fc_df
+
+        plots.plot_macro_forecast(
+            macro_df,
+            forecast_dfs,
+            tail=tail,
+            figsize=figsize,
+            verbose=verbose
+        )
+        return self
+
+    def plot_pd_forecast(self, figsize: tuple = (12, 6), verbose: bool = False) -> "Portfolio":
+        """
+        Plots the comparison between predicted and reference PD for each ticker.
+
+        Args:
+            figsize (tuple): Figure size.
+            verbose (bool): Whether to show the plot.
+
+        Returns:
+            Portfolio: Self.
+        """
+        if 'pd_forecast' not in self.d:
+            log.error("No PD forecast found. Run predict_pd() first.")
             return self
 
-        plots.plot_macro_forecast(macro_df, forecast_df, tail=tail, figsize=figsize, verbose=verbose)
+        plots.plot_pd_forecast(self.d['pd_forecast'], figsize=figsize, verbose=verbose)
         return self
 
     def plot_pd_by_tickers(

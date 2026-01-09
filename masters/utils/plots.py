@@ -410,65 +410,62 @@ def plot_macro_significance(
 
 def plot_macro_forecast(
     macro_df: pd.DataFrame,
-    forecast_df: pd.DataFrame,
+    forecast_dfs: dict,
     tail: int = 0,
-    figsize: tuple = (12, 8),
+    figsize: tuple = (12, 10),
     verbose: bool = False,
 ):
     """
-    Plots historical and forecasted values for macro parameters.
+    Plots historical and forecasted values for macro parameters from multiple models.
 
     Args:
         macro_df (pd.DataFrame): Historical macro data.
-        forecast_df (pd.DataFrame): Forecasted macro data.
-        tail (int): Number of last months to show. If 0, shows all history.
+        forecast_dfs (dict): Dictionary mapping model labels to forecast DataFrames.
+        tail (int): Number of last months to show.
         figsize (tuple): Figure size.
         verbose (bool): Whether to show the plot.
     """
-    factors = macro_df.columns
+    factors = list(macro_df.columns)
     n_factors = len(factors)
 
     fig, axes = plt.subplots(n_factors, 1, figsize=figsize, sharex=True)
     if n_factors == 1:
         axes = [axes]
 
-    # Apply tail to history for visualization
-    plot_df = macro_df.tail(tail) if tail > 0 else macro_df
+    # Define colors for different models
+    colors = ['darkred', 'darkgreen', 'orange', 'purple', 'brown']
 
     for i, factor in enumerate(factors):
         ax = axes[i]
 
-        # Plot history
-        ax.plot(plot_df.index, plot_df[factor], label="History (Fact)", color="royalblue", linewidth=2)
+        # Plot Macro factor
+        plot_df = macro_df.tail(tail) if tail > 0 else macro_df
+        ax.plot(plot_df.index, plot_df[factor], label="Fact", color="royalblue", linewidth=2.5)
 
-        # Plot forecast (connect to the last point before forecast started)
-        first_fc_date = forecast_df.index[0]
-        history_before_fc = macro_df[macro_df.index < first_fc_date]
+        for idx, (label, forecast_df) in enumerate(forecast_dfs.items()):
+            color = colors[idx % len(colors)]
+            first_fc_date = forecast_df.index[0]
+            history_before_fc = macro_df[macro_df.index < first_fc_date]
 
-        if not history_before_fc.empty:
-            last_hist_before = history_before_fc.index[-1]
-            last_val_before = history_before_fc[factor].iloc[-1]
-            fc_dates = [last_hist_before] + list(forecast_df.index)
-            fc_vals = [last_val_before] + list(forecast_df[factor])
-        else:
-            fc_dates = list(forecast_df.index)
-            fc_vals = list(forecast_df[factor])
+            if not history_before_fc.empty:
+                fc_dates = [history_before_fc.index[-1]] + list(forecast_df.index)
+                fc_vals = [history_before_fc[factor].iloc[-1]] + list(forecast_df[factor])
+            else:
+                fc_dates, fc_vals = list(forecast_df.index), list(forecast_df[factor])
 
-        ax.plot(fc_dates, fc_vals, label="Forecast", color="darkred", linestyle="--", linewidth=2)
-        ax.scatter(forecast_df.index, forecast_df[factor], color="darkred", s=30)
+            ax.plot(fc_dates, fc_vals, label=f"FC: {label}", color=color, linestyle="--", linewidth=1.5)
+            ax.scatter(forecast_df.index, forecast_df[factor], color=color, s=20)
 
-        ax.set_title(f"Forecast: {factor}", fontsize=12)
-        ax.legend()
+        ax.set_title(f"Macro Factor: {factor}", fontsize=12)
+        ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
-
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
 
     plt.xlabel("Date", fontsize=10)
     plt.xticks(rotation=90)
     plt.tight_layout()
 
-    save_path = "logs/graphs/macro_forecast.png"
+    save_path = "logs/graphs/macro_comparison.png"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
 
@@ -478,5 +475,63 @@ def plot_macro_forecast(
         plt.clf()
     plt.close()
 
-    log.info(f"Macro forecast plot saved: {save_path}")
+    log.info(f"Macro comparison plot saved: {save_path}")
+
+
+def plot_pd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbose: bool = False):
+    """
+    Plots a bar chart comparing predicted PD vs reference PD for tickers.
+
+    Args:
+        forecast_df (pd.DataFrame): DataFrame with columns 'predicted_pd' and 'reference_pd'.
+        figsize (tuple): Figure size.
+        verbose (bool): Whether to show the plot.
+    """
+    if forecast_df.empty:
+        log.warning("Forecast DataFrame is empty. Cannot plot PD forecast.")
+        return
+
+    df = forecast_df.sort_values("predicted_pd", ascending=False)
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=150)
+
+    x = np.arange(len(df))
+    width = 0.35
+
+    ax.bar(
+        x - width / 2,
+        df["reference_pd"] * 100,
+        width,
+        label="Fact (Reference)",
+        color="royalblue",
+        alpha=0.7,
+    )
+    ax.bar(
+        x + width / 2,
+        df["predicted_pd"] * 100,
+        width,
+        label="Forecast",
+        color="darkred",
+        alpha=0.8,
+    )
+
+    ax.set_ylabel("PD, %", fontsize=12)
+    ax.set_title("Comparison: Predicted PD vs Ground Truth", fontsize=14, pad=15)
+    ax.set_xticks(x)
+    ax.set_xticklabels(df.index, rotation=90)
+    ax.legend(fontsize=10)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+
+    save_path = "logs/graphs/pd_forecast_comparison.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+    log.info(f"PD forecast comparison plot saved: {save_path}")
 
