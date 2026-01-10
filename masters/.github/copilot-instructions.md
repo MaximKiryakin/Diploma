@@ -17,7 +17,9 @@
 
 ## 4. Git Commit Standards
 Follow the **Conventional Commits 1.0.0** specification:
-- **Format**: `<type>(<scope>): <short description>`
+- **Format**: `<type>(<scope>): <short description>;`
+- **Body**: Use a bulleted list for detailed changes if the commit contains multiple modifications.
+- **Rule**: Description and body must be in English, lowercase, and the short description must end with `;`.
 - **Types**:
   - `feat`: New features
   - `fix`: Bug fixes
@@ -27,5 +29,11 @@ Follow the **Conventional Commits 1.0.0** specification:
   - `perf`: Code changes that improve performance
   - `test`: Adding missing tests
   - `chore`: Changes to the build process or auxiliary tools/libraries
-- **Rule**: Description must be in English, lowercase, and ; at the end.
-- **Example**: `feat(portfolio): add merton model calculation`
+- **Example**:
+  ```text
+  feat(portfolio): implement risk-based optimization and backtesting;
+
+  - add `optimize_portfolio` to minimize volatility and expected loss.
+  - implement `backtest_portfolio_strategies` for active vs passive comparison.
+  - fix `Backtest Start` marker logic in strategy plots;
+  ```
