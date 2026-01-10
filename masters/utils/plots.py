@@ -496,11 +496,13 @@ def plot_macro_forecast(
     for i, factor in enumerate(factors):
         ax = axes[i]
         is_pd = factor == "PD"
+        is_dd = factor == "DD"
 
         # Plot Historical data
         plot_df = macro_df.tail(tail) if tail > 0 else macro_df
 
         # Scale PD to percentages for better readability
+        # DD is not scaled
         fact_vals = plot_df[factor] * 100 if is_pd else plot_df[factor]
         ax.plot(plot_df.index, fact_vals, label="Fact", color="royalblue", linewidth=2.5)
 
@@ -526,8 +528,14 @@ def plot_macro_forecast(
             ax.plot(fc_dates, fc_vals, label=f"FC: {label}", color=color, linestyle="--", linewidth=1.5)
             ax.scatter(forecast_df.index, fc_vals_scaled, color=color, s=20)
 
-        title = "Portfolio Average PD (%)" if is_pd else f"Macro Factor: {factor}"
-        ax.set_title(title, fontsize=12, fontweight="bold" if is_pd else "normal")
+        if is_pd:
+            title = "Portfolio Average PD (%)"
+        elif is_dd:
+            title = "Portfolio Average Distance to Default (DD)"
+        else:
+            title = f"Macro Factor: {factor}"
+
+        ax.set_title(title, fontsize=12, fontweight="bold" if (is_pd or is_dd) else "normal")
         ax.legend(loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
@@ -605,3 +613,61 @@ def plot_pd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbos
         plt.clf()
     plt.close()
     log.info(f"PD forecast comparison plot saved: {save_path}")
+
+
+def plot_dd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbose: bool = False):
+    """
+    Plots a bar chart comparing predicted DD vs reference DD for tickers.
+
+    Args:
+        forecast_df (pd.DataFrame): DataFrame with columns 'predicted_dd' and 'reference_dd'.
+        figsize (tuple): Figure size.
+        verbose (bool): Whether to show the plot.
+    """
+    if forecast_df.empty:
+        log.warning("Forecast DataFrame is empty. Cannot plot DD forecast.")
+        return
+
+    df = forecast_df.sort_values("predicted_dd", ascending=True)
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=150)
+
+    x = np.arange(len(df))
+    width = 0.35
+
+    ax.bar(
+        x - width / 2,
+        df["reference_dd"],
+        width,
+        label="Fact (Reference)",
+        color="royalblue",
+        alpha=0.7,
+    )
+    ax.bar(
+        x + width / 2,
+        df["predicted_dd"],
+        width,
+        label="Forecast",
+        color="darkred",
+        alpha=0.8,
+    )
+
+    ax.set_ylabel("Distance to Default (DD)", fontsize=12)
+    ax.set_title("Comparison: Predicted DD vs Ground Truth", fontsize=14, pad=15)
+    ax.set_xticks(x)
+    ax.set_xticklabels(df.index, rotation=90)
+    ax.legend(fontsize=10)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+
+    save_path = "logs/graphs/dd_forecast_comparison.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+    log.info(f"DD forecast comparison plot saved: {save_path}")

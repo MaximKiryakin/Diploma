@@ -520,13 +520,13 @@ class Portfolio:
 
     def _merton_pd(self, T: float = 1) -> "Portfolio":
         """
-        Calculates the probability of default (PD) using the Merton model.
+        Calculates the probability of default (PD) and distance to default (DD) using the Merton model.
 
         Args:
             T (float): Time horizon for the default event (in years).
 
         Returns:
-            Portfolio: Updated portfolio with calculated probabilities of default.
+            Portfolio: Updated portfolio with calculated probabilities of default and distance to default.
         """
 
         V = self.d["portfolio"]["V"].values.astype(float)
@@ -537,17 +537,19 @@ class Portfolio:
             np.log(V / np.where(D != 0, D, 1e-6)) + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
         ) / (sigma_V * np.sqrt(T))
         self.d["portfolio"]["PD"] = norm.cdf(-d2)
+        self.d["portfolio"]["DD"] = d2
 
-        log.info("Merton's probabilities of default calculated.")
+        log.info("Merton's probabilities of default and distance to default calculated.")
 
         return self
 
     def add_merton_pd(self) -> "Portfolio":
         """
-        Adds the probability of default (PD) calculated using the Merton model to the portfolio data.
+        Adds the probability of default (PD) and distance to default (DD)
+        calculated using the Merton model to the portfolio data.
 
         Returns:
-            Portfolio: Updated portfolio with added probabilities of default.
+            Portfolio: Updated portfolio with added probabilities of default and distance to default.
         """
         self = self._solve_merton_vectorized()._merton_pd()
 
@@ -740,6 +742,79 @@ class Portfolio:
         self.d["pd_forecast"] = result_df
         return self
 
+    def predict_dd(self, horizon: int = 1, training_offset: int = 0, model_type: str = "var") -> "Portfolio":
+        """
+        Predicts Distance to Default (DD) for portfolio assets based on macro forecasts.
+
+        Args:
+            horizon (int): Forecasting horizon in months.
+            training_offset (int): Months of history to hide for backtesting.
+            model_type (str): Type of macro model to use.
+
+        Returns:
+            Portfolio: Self with results stored in self.d['dd_forecast'].
+        """
+        if horizon < 0:
+            training_offset = abs(horizon)
+            horizon = abs(horizon)
+
+        macro_forecast = self.predict_macro_factors(
+            horizon=horizon, training_offset=training_offset, model_type=model_type
+        )
+
+        dd_daily = self.d["portfolio"][["date", "ticker", "DD"]]
+        dd_pivot = dd_daily.pivot(index="date", columns="ticker", values="DD")
+        dd_monthly = dd_pivot.resample("ME").last()
+        dd_monthly.index = dd_monthly.index.normalize() + pd.offsets.MonthEnd(0)
+
+        macro_cols = macro_forecast.columns.tolist()
+        macro_hist = (
+            self.d["portfolio"][["date"] + macro_cols]
+            .drop_duplicates("date")
+            .set_index("date")
+            .resample("ME")
+            .mean()
+            .dropna()
+        )
+        macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
+
+        combined_data = pd.concat([dd_monthly, macro_hist], axis=1).dropna()
+        train_combined = combined_data.iloc[:-training_offset] if training_offset > 0 else combined_data
+
+        predictions = {}
+        for ticker in dd_monthly.columns:
+            if ticker not in train_combined.columns:
+                continue
+
+            y = train_combined[ticker]
+            # OLS on DD is more stable than on PD
+            x = sm.add_constant(train_combined[macro_cols])
+            model = sm.OLS(y, x).fit()
+
+            x_pred = sm.add_constant(macro_forecast, has_constant="add")
+            if "const" not in x_pred.columns:
+                x_pred["const"] = 1.0
+
+            y_pred = model.predict(x_pred)
+            predictions[ticker] = y_pred.iloc[-1]
+
+        result_df = pd.DataFrame.from_dict(predictions, orient="index", columns=["predicted_dd"])
+        result_df.index.name = "ticker"
+
+        target_date = macro_forecast.index[-1]
+        comparison_dd = dd_monthly.loc[target_date] if target_date in dd_monthly.index else dd_pivot.ffill().iloc[-1]
+
+        result_df["reference_dd"] = comparison_dd
+        result_df["delta"] = result_df["predicted_dd"] - result_df["reference_dd"]
+        result_df["model"] = model_type
+
+        # Convert back to PD for visualization consistency
+        result_df["predicted_pd"] = norm.cdf(-result_df["predicted_dd"].astype(float))
+        result_df["reference_pd"] = norm.cdf(-result_df["reference_dd"].astype(float))
+
+        self.d["dd_forecast"] = result_df
+        return self
+
     def backtest_pd(self, n_months: int = 12, models: List[str] = None) -> "Portfolio":
         """
         Performs backtesting of PD predictions across multiple macro models.
@@ -771,23 +846,56 @@ class Portfolio:
         self.d["pd_backtest"] = pd.concat(all_results, ignore_index=True)
         return self
 
+    def backtest_dd(self, n_months: int = 12, models: List[str] = None) -> "Portfolio":
+        """
+        Performs backtesting of DD predictions across multiple macro models.
+
+        Args:
+            n_months (int): Number of months for the backtest window.
+            models (List[str], optional): List of models to test. Defaults to ['var'].
+
+        Returns:
+            Portfolio: Self with backtest results in self.d['dd_backtest'].
+        """
+        if models is None:
+            models = ["var"]
+
+        all_results = []
+        for m_type in models:
+            log.info(f"Backtesting DD using {m_type} model...")
+            for offset in range(n_months, 0, -1):
+                self.predict_dd(horizon=1, training_offset=offset, model_type=m_type)
+
+                # Get the date being predicted for labeling
+                macro_fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
+                target_date = macro_fc.index[-1]
+
+                res = self.d["dd_forecast"].copy().reset_index()
+                res["date"] = target_date
+                all_results.append(res)
+
+        self.d["dd_backtest"] = pd.concat(all_results, ignore_index=True)
+        return self
+
     def plot_macro_forecast(
         self,
         horizon: int = 1,
         training_offset: int = 0,
         models: Union[str, list] = "var",
         tail: int = 12,
+        target_col: str = "DD",
         verbose: bool = False,
         figsize: tuple = (12, 14),
     ):
         """
-        Plots historical and forecasted values for macro parameters and Portfolio PD.
+        Plots historical and forecasted values for macro parameters and Portfolio DD/PD.
 
         Args:
             horizon (int): Forecasting horizon.
             training_offset (int): Offset for backtesting.
             models (str|list): Model types to compare.
             tail (int): History months to show.
+            target_col (str): 'DD' or 'PD'.
             verbose (bool): Whether to show the plot.
             figsize (tuple): Figure size.
         """
@@ -801,16 +909,16 @@ class Portfolio:
         else:
             log.info(f"Visualizing Multi-step forecast for {horizon} months")
 
-        # Get historical data including Portfolio PD
+        # Get historical data including Portfolio Target
         macro_cols = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
 
-        # Calculate daily portfolio PD
-        port_pd = self.d["portfolio"].groupby("date")["PD"].mean().reset_index()
+        # Calculate daily portfolio average target
+        port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
 
         macro_df = (
             self.d["portfolio"][["date"] + macro_cols]
             .drop_duplicates("date")
-            .merge(port_pd, on="date", how="left")
+            .merge(port_target, on="date", how="left")
             .set_index("date")
             .resample("ME")
             .mean()
@@ -829,9 +937,13 @@ class Portfolio:
                     # Macro step
                     fc_step = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
 
-                    # PD step
-                    self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
-                    fc_step["PD"] = self.d["pd_forecast"]["predicted_pd"].mean()
+                    # Target step
+                    if target_col == "PD":
+                        self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
+                        fc_step["PD"] = self.d["pd_forecast"]["predicted_pd"].mean()
+                    else:
+                        self.predict_dd(horizon=1, training_offset=offset, model_type=m_type)
+                        fc_step["DD"] = self.d["dd_forecast"]["predicted_dd"].mean()
 
                     step_fcs.append(fc_step)
 
@@ -841,15 +953,16 @@ class Portfolio:
                 # NORMAL: multi-step forecast
                 fc_df = self.predict_macro_factors(horizon=horizon, training_offset=training_offset, model_type=m_type)
 
-                # For simplicity in multi-step plot, we'll only show PD if we can predict it for all steps
-                # Let's run a loop for PD if horizon > 1
-                pd_trajectory = []
+                trajectory = []
                 for i in range(1, horizon + 1):
-                    # This is slightly inefficient but ensures consistency
-                    self.predict_pd(horizon=i, training_offset=training_offset, model_type=m_type)
-                    pd_trajectory.append(self.d["pd_forecast"]["predicted_pd"].mean())
+                    if target_col == "PD":
+                        self.predict_pd(horizon=i, training_offset=training_offset, model_type=m_type)
+                        trajectory.append(self.d["pd_forecast"]["predicted_pd"].mean())
+                    else:
+                        self.predict_dd(horizon=i, training_offset=training_offset, model_type=m_type)
+                        trajectory.append(self.d["dd_forecast"]["predicted_dd"].mean())
 
-                fc_df["PD"] = pd_trajectory
+                fc_df[target_col] = trajectory
                 forecast_dfs[m_type] = fc_df
 
         plots.plot_macro_forecast(macro_df, forecast_dfs, tail=tail, figsize=figsize, verbose=verbose)
@@ -871,6 +984,24 @@ class Portfolio:
             return self
 
         plots.plot_pd_forecast(self.d["pd_forecast"], figsize=figsize, verbose=verbose)
+        return self
+
+    def plot_dd_forecast(self, figsize: tuple = (12, 6), verbose: bool = False) -> "Portfolio":
+        """
+        Plots the comparison between predicted and reference DD for each ticker.
+
+        Args:
+            figsize (tuple): Figure size.
+            verbose (bool): Whether to show the plot.
+
+        Returns:
+            Portfolio: Self.
+        """
+        if "dd_forecast" not in self.d:
+            log.error("No DD forecast found. Run predict_dd() first.")
+            return self
+
+        plots.plot_dd_forecast(self.d["dd_forecast"], figsize=figsize, verbose=verbose)
         return self
 
     def plot_ticker_dashboards(self, tickers: list, figsize_row: tuple = (18, 5), verbose: bool = False) -> "Portfolio":
