@@ -1,5 +1,4 @@
 import logging
-import sys
 import os
 import types
 from typing import Optional
@@ -10,8 +9,9 @@ logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
 DEFAULT_LOG_FILE = os.path.join("logs", "app.log")
 
-#FORMAT = "%(asctime)s:%(name)s:%(funcName)s:%(levelname)s: %(message)s"
+# FORMAT = "%(asctime)s:%(name)s:%(funcName)s:%(levelname)s: %(message)s"
 FORMAT = "%(asctime)s:%(name)s:%(levelname)s: %(message)s"
+
 
 def _log_missing_values_summary(self, dataframe_or_dict, title: str = "Missing Values Summary") -> None:
     """Custom method attached to logger instances. Accepts either a DataFrame or a pre-calculated dict."""
@@ -38,6 +38,7 @@ def _log_missing_values_summary(self, dataframe_or_dict, title: str = "Missing V
     df = pd.DataFrame(data)
     self.log_dataframe(df, title=title)
 
+
 def Logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[str] = None) -> logging.Logger:
     """
     Factory function that configures and returns a standard logging.Logger.
@@ -59,7 +60,7 @@ def Logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[s
     # 1. File Handler
     log_path = log_file or DEFAULT_LOG_FILE
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
@@ -76,13 +77,16 @@ def Logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[s
 
     return logger
 
+
 def get_logger(name: str = __name__, level: int = logging.INFO, log_file: Optional[str] = None) -> logging.Logger:
     return Logger(name, level, log_file)
 
-# Keep standalone function for compatibility if imported directly
-def log_missing_values_summary(logger_obj: logging.Logger, missing_dict: dict, title: str = "Missing Values Summary") -> None:
-    _log_missing_values_summary(logger_obj, missing_dict, title)
 
+# Keep standalone function for compatibility if imported directly
+def log_missing_values_summary(
+    logger_obj: logging.Logger, missing_dict: dict, title: str = "Missing Values Summary"
+) -> None:
+    _log_missing_values_summary(logger_obj, missing_dict, title)
 
 
 def _log_dataframe(self, df, title: str = None) -> None:
@@ -123,15 +127,16 @@ def _log_dataframe(self, df, title: str = None) -> None:
     else:
         self.info(df_str)
 
+
 class PrintHandler(logging.Handler):
     """
     Custom handler that uses print() to output logs.
     This often works better in Jupyter notebooks than writing directly to sys.stdout/stderr.
     """
+
     def emit(self, record):
         try:
             msg = self.format(record)
             print(msg)
         except Exception:
             self.handleError(record)
-

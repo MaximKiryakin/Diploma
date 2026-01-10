@@ -11,9 +11,8 @@ from utils.logger import Logger
 
 log = Logger(__name__)
 
-def plot_pd_by_tickers(
-    portfolio_df: pd.DataFrame, tickers: list, figsize: tuple = (12, 5), verbose: bool = False
-):
+
+def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple = (12, 5), verbose: bool = False):
     """
     Plots the probability of default (PD) for the given tickers.
     """
@@ -29,8 +28,11 @@ def plot_pd_by_tickers(
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
 
         ax.plot(
-            data["date"], data["PD"] * 100, color="royalblue",
-            linewidth=2, markersize=5,
+            data["date"],
+            data["PD"] * 100,
+            color="royalblue",
+            linewidth=2,
+            markersize=5,
         )
 
         ax.set_title(f"Вероятность дефолта ({ticker})", fontsize=14, pad=10)
@@ -62,13 +64,11 @@ def calc_irf(
     if impulses_responses is None:
         raise ValueError("Impulses and responses must be specified")
 
-    columns = np.unique(
-        list(impulses_responses.keys()) + list(impulses_responses.values())
-    )
+    columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
 
     # Group by date to aggregate data across tickers (e.g., mean PD)
     # This creates a single time series for the VAR model
-    if 'date' in portfolio_df.columns:
+    if "date" in portfolio_df.columns:
         data = portfolio_df.groupby("date")[columns].mean().sort_index().dropna()
     else:
         log.warning("'date' column not found. Using raw data (stacked tickers?) for VAR.")
@@ -83,8 +83,8 @@ def calc_irf(
         # For now, let's drop them and see if anything remains.
         data = data.drop(columns=constant_cols)
         if data.empty or len(data.columns) < 2:
-             log.error("Not enough variables left for VAR analysis.")
-             return
+            log.error("Not enough variables left for VAR analysis.")
+            return
 
     cols_before_diff = {}
     for col in data.columns:
@@ -98,12 +98,12 @@ def calc_irf(
         # Re-check for constant columns after differencing
         constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
         if constant_cols:
-             log.warning(f"Constant columns after differencing: {constant_cols}. Dropping them.")
-             data = data.drop(columns=constant_cols)
+            log.warning(f"Constant columns after differencing: {constant_cols}. Dropping them.")
+            data = data.drop(columns=constant_cols)
 
         if data.empty or len(data.columns) < 2:
-             log.error("Not enough variables left for VAR analysis after differencing.")
-             return
+            log.error("Not enough variables left for VAR analysis after differencing.")
+            return
 
         for col in data.columns:
             cols_before_diff[col] = adfuller(data[col].dropna())[1]
@@ -117,9 +117,7 @@ def calc_irf(
         lag_order = model.select_order(maxlags=6)
         selected_lags = lag_order.aic
 
-        log.info(
-            f"Optimal lag number calculated | Optimal number of lags: {selected_lags}"
-        )
+        log.info(f"Optimal lag number calculated | Optimal number of lags: {selected_lags}")
 
         results = model.fit(maxlags=selected_lags, ic="aic")
 
@@ -188,7 +186,8 @@ def calc_irf(
             plt.clf()
     plt.close()
 
-    log.info(f"Impulse response functions saved | Path: logs/graphs/")
+    log.info("Impulse response functions saved | Path: logs/graphs/")
+
 
 def plot_correlation_matrix(
     portfolio_df: pd.DataFrame,
@@ -203,11 +202,9 @@ def plot_correlation_matrix(
     Plots and saves the correlation matrix of stock closing prices.
     """
     if save_path is None:
-        save_path = f"logs/graphs/corr_matrix.png"
+        save_path = "logs/graphs/corr_matrix.png"
 
-    pivot_data = portfolio_df.pivot_table(
-        index="date", columns="ticker", values="close"
-    )
+    pivot_data = portfolio_df.pivot_table(index="date", columns="ticker", values="close")
 
     pivot_data = pivot_data.interpolate(method="time", limit_direction="both")
     valid_tickers = [t for t in custom_order if t in pivot_data.columns]
@@ -251,6 +248,7 @@ def plot_correlation_matrix(
         plt.clf()
     plt.close()
 
+
 def plot_stocks(
     portfolio_df: pd.DataFrame,
     tickers: list,
@@ -271,8 +269,10 @@ def plot_stocks(
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
 
         ax.plot(
-            stock_data["date"], stock_data["close"],
-            label="Closing price", color="royalblue",
+            stock_data["date"],
+            stock_data["close"],
+            label="Closing price",
+            color="royalblue",
             linewidth=2,
         )
 
@@ -294,13 +294,11 @@ def plot_stocks(
         log.info("Stock prices graphs saved: logs/graphs/")
 
 
-def plot_debt_capitalization(
-    portfolio_df: pd.DataFrame, verbose: bool = False, figsize: tuple = (12, 5)
-):
+def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, figsize: tuple = (12, 5)):
     """
     Plots a combined chart of capitalization and debt on the same Y-axis.
     """
-    save_path = f"logs/graphs/debt_catitalization.png"
+    save_path = "logs/graphs/debt_catitalization.png"
     grouped = portfolio_df.groupby("ticker")
 
     for ticker, group in grouped:
@@ -308,17 +306,9 @@ def plot_debt_capitalization(
 
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
 
-        ax.plot(
-            group["date"], group["capitalization"],
-            color="#2ecc71", label="Capitalization",
-            linewidth=2
-        )
+        ax.plot(group["date"], group["capitalization"], color="#2ecc71", label="Capitalization", linewidth=2)
 
-        ax.plot(
-            group["date"], group["debt"],
-            color="#e74c3c",
-            linewidth=2, label="Debt"
-        )
+        ax.plot(group["date"], group["debt"], color="#e74c3c", linewidth=2, label="Debt")
 
         ax.set_title(f"{ticker}: Capitalization vs Debt", fontsize=14, pad=10)
         ax.set_xlabel("Date", fontsize=12), ax.set_ylabel("Value", fontsize=12)
@@ -338,11 +328,9 @@ def plot_debt_capitalization(
     if save_path:
         log.info(f"Capitalization-debt graphs saved: {save_path}")
 
+
 def plot_ticker_dashboards_grid(
-    portfolio_df: pd.DataFrame,
-    tickers: list,
-    figsize_row: tuple = (20, 5),
-    verbose: bool = False
+    portfolio_df: pd.DataFrame, tickers: list, figsize_row: tuple = (20, 5), verbose: bool = False
 ):
     """
     Plots a multi-panel dashboard for each ticker.
@@ -387,7 +375,7 @@ def plot_ticker_dashboards_grid(
         for ax in axes[i]:
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
             ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-            ax.tick_params(axis='x', rotation=90)
+            ax.tick_params(axis="x", rotation=90)
 
     plt.tight_layout()
     save_path = "logs/graphs/ticker_dashboards.png"
@@ -400,11 +388,12 @@ def plot_ticker_dashboards_grid(
         plt.clf()
     plt.close()
 
+
 def plot_macro_significance(
     macro_connection_summary: pd.DataFrame,
     save_path: str = "logs/graphs/macro_significance_summary.png",
     verbose: bool = False,
-    figsize: tuple = (10, 6)
+    figsize: tuple = (10, 6),
 ):
     """
     Plots the significance of macroeconomic factors on Merton model parameters.
@@ -412,22 +401,22 @@ def plot_macro_significance(
     if macro_connection_summary is None:
         raise ValueError("Macro connection summary not calculated.")
 
-    factors = ['inflation', 'unemployment', 'usd_rub']
-    factor_labels = ['Инфляция', 'Безработица', 'USD/RUB']
-    significance_data = {'capitalization': [], 'debt': []}
+    factors = ["inflation", "unemployment", "usd_rub"]
+    factor_labels = ["Инфляция", "Безработица", "USD/RUB"]
+    significance_data = {"capitalization": [], "debt": []}
 
-    for target in ['capitalization', 'debt']:
-        target_data = macro_connection_summary[macro_connection_summary['target'] == target]
+    for target in ["capitalization", "debt"]:
+        target_data = macro_connection_summary[macro_connection_summary["target"] == target]
         for factor in factors:
-            ci_col = f'coef_{factor}_ci'
+            ci_col = f"coef_{factor}_ci"
             significant = sum(
-                1 for _, row in target_data.iterrows()
-                if pd.notna(row[ci_col]) and (
-                    lambda nums: len(nums) == 2 and (
-                        (float(nums[0]) > 0 and float(nums[1]) > 0) or
-                        (float(nums[0]) < 0 and float(nums[1]) < 0)
-                    )
-                )(re.findall(r'-?\d+\.\d+', str(row[ci_col])))
+                1
+                for _, row in target_data.iterrows()
+                if pd.notna(row[ci_col])
+                and (
+                    lambda nums: len(nums) == 2
+                    and ((float(nums[0]) > 0 and float(nums[1]) > 0) or (float(nums[0]) < 0 and float(nums[1]) < 0))
+                )(re.findall(r"-?\d+\.\d+", str(row[ci_col])))
             )
             total = target_data[ci_col].notna().sum()
             significance_data[target].append(significant / total * 100 if total > 0 else 0)
@@ -436,32 +425,38 @@ def plot_macro_significance(
     x = np.arange(len(factor_labels))
     width = 0.35
 
-    cap_bars = ax.bar(x - width/2, significance_data['capitalization'], width,
-                     label='Капитализация', color='steelblue', alpha=0.8)
-    debt_bars = ax.bar(x + width/2, significance_data['debt'], width,
-                      label='Долг', color='darkred', alpha=0.8)
+    cap_bars = ax.bar(
+        x - width / 2, significance_data["capitalization"], width, label="Капитализация", color="steelblue", alpha=0.8
+    )
+    debt_bars = ax.bar(x + width / 2, significance_data["debt"], width, label="Долг", color="darkred", alpha=0.8)
 
-    ax.set_xlabel('Макроэкономические факторы', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Доля значимых связей, %', fontsize=12, fontweight='bold')
-    ax.set_title('Влияние макрофакторов на параметры модели Мертона',
-                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel("Макроэкономические факторы", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Доля значимых связей, %", fontsize=12, fontweight="bold")
+    ax.set_title("Влияние макрофакторов на параметры модели Мертона", fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(factor_labels)
     ax.legend(fontsize=11)
     ax.set_ylim(0, 100)
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
 
     for bars in [cap_bars, debt_bars]:
         for bar in bars:
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 1,
-                   f'{height:.0f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 1,
+                f"{height:.0f}%",
+                ha="center",
+                va="bottom",
+                fontweight="bold",
+                fontsize=10,
+            )
 
     plt.tight_layout()
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
         log.info(f"Macro significance plot saved | Path: {save_path}")
 
     if verbose:
@@ -469,6 +464,7 @@ def plot_macro_significance(
     else:
         plt.clf()
     plt.close()
+
 
 def plot_macro_forecast(
     macro_df: pd.DataFrame,
@@ -495,11 +491,11 @@ def plot_macro_forecast(
         axes = [axes]
 
     # Define colors for different models
-    colors = ['darkred', 'darkgreen', 'orange', 'purple', 'brown']
+    colors = ["darkred", "darkgreen", "orange", "purple", "brown"]
 
     for i, factor in enumerate(factors):
         ax = axes[i]
-        is_pd = factor == 'PD'
+        is_pd = factor == "PD"
 
         # Plot Historical data
         plot_df = macro_df.tail(tail) if tail > 0 else macro_df
@@ -531,8 +527,8 @@ def plot_macro_forecast(
             ax.scatter(forecast_df.index, fc_vals_scaled, color=color, s=20)
 
         title = "Portfolio Average PD (%)" if is_pd else f"Macro Factor: {factor}"
-        ax.set_title(title, fontsize=12, fontweight='bold' if is_pd else 'normal')
-        ax.legend(loc='best', fontsize=9)
+        ax.set_title(title, fontsize=12, fontweight="bold" if is_pd else "normal")
+        ax.legend(loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
 
@@ -609,4 +605,3 @@ def plot_pd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbos
         plt.clf()
     plt.close()
     log.info(f"PD forecast comparison plot saved: {save_path}")
-

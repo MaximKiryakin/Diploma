@@ -21,14 +21,14 @@ def load_pickle_object(file_path: str):
         obj = pickle.load(file)
     return obj
 
+
 def update_pickle_object(file_path: str, obj) -> None:
     """Saves an object to the specified file path using pickle."""
     with open(file_path, "wb") as file:
         pickle.dump(obj, file)
 
-def download_finam_quotes(
-    ticker: str, period: int, start: str, end: str, bucket_size: int = 100
-) -> pd.DataFrame:
+
+def download_finam_quotes(ticker: str, period: int, start: str, end: str, bucket_size: int = 100) -> pd.DataFrame:
     """
     Downloads historical market data from Finam and returns as DataFrame
 
@@ -48,9 +48,7 @@ def download_finam_quotes(
     """
 
     if ticker not in tickers:
-        raise ValueError(
-            f"\nTicker {ticker} not found. Available tickers: {list(tickers.keys())}"
-        )
+        raise ValueError(f"\nTicker {ticker} not found. Available tickers: {list(tickers.keys())}")
 
     period_deltas = {
         2: timedelta(minutes=1),
@@ -76,11 +74,7 @@ def download_finam_quotes(
     end_date = datetime.strptime(end, "%Y-%m-%d")
     result_df, first_bucket = None, True
 
-    total_intervals = (end_date - current_start) / delta
-    #pbar = tqdm(total=total_intervals, desc=f"Downloading {ticker}", leave=False)
-
     while current_start <= end_date:
-
         start_rev = current_start.strftime("%Y%m%d")
         end_rev = min(current_start + delta * bucket_size, end_date).strftime("%Y%m%d")
         tmp = min(current_start + delta * bucket_size, end_date)
@@ -117,7 +111,6 @@ def download_finam_quotes(
         url = f"http://export.finam.ru/{ticker}_{start_rev}_{end_rev}.csv?{params}"
 
         try:
-
             with urlopen(url) as response:
                 content = response.read().decode("utf-8")
                 lines = [line.split(",") for line in content.splitlines()]
@@ -137,22 +130,17 @@ def download_finam_quotes(
                 else:
                     result_df = pd.concat([result_df, pd.DataFrame(lines[1:], columns=result_df.columns)])
 
-                last_date = datetime.strptime(
-                    f"{lines[-1][2]} {lines[-1][3]}", "%Y%m%d %H%M%S"
-                )
-                #pbar.update((last_date + delta - current_start) / delta)
+                last_date = datetime.strptime(f"{lines[-1][2]} {lines[-1][3]}", "%Y%m%d %H%M%S")
+                # pbar.update((last_date + delta - current_start) / delta)
                 current_start = last_date + delta
 
         except Exception as e:
             log.error(f"Download error for ticker {ticker}: {str(e)}")
             break
 
-    #pbar.close()
+    # pbar.close()
     date = pd.to_datetime(result_df["<DATE>"])
-    log.info(
-        f"Downloaded dates range for ticker {ticker} : "
-        f"[{date.min()} - {date.max()}]"
-    )
+    log.info(f"Downloaded dates range for ticker {ticker} : " f"[{date.min()} - {date.max()}]")
 
     return result_df
 
@@ -192,7 +180,6 @@ def load_stock_data(
     """
 
     total_df: Optional[pd.DataFrame] = None
-    req_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
 
     for ticker in tickers_list:
         # 1. Download from Finam
@@ -203,54 +190,6 @@ def load_stock_data(
             end=end_date,
             bucket_size=bucket_size,
         )
-
-        dates = pd.to_datetime(ticker_data["<DATE>"], format="%Y%m%d")
-        finam_min_date = dates.min()
-
-        # print(ticker_data)
-        # if finam_min_date > req_start_dt:
-        #     log.info(f'Download data from finam: {finam_min_date}, requested start date: {req_start_dt}')
-        #     # Yahoo ticker format for MOEX
-        #     y_ticker = f"{ticker}.ME"
-        #     y_data = yf.download(
-        #         y_ticker,
-        #         start=req_start_dt.strftime("%Y-%m-%d"),
-        #         end=finam_min_date.strftime("%Y-%m-%d"),
-        #         progress=False,
-        #         interval="1d", # Assuming daily step for backfill
-        #         auto_adjust=False
-        #     )
-
-        #     if isinstance(y_data.columns, pd.MultiIndex):
-        #         y_data.columns = y_data.columns.get_level_values(0)
-
-        #     y_data = y_data.reset_index()
-
-        #     # Map columns to Finam format
-        #     df_y = pd.DataFrame()
-        #     df_y["<TICKER>"] = ticker
-        #     df_y["<PER>"] = step
-        #     df_y["<DATE>"] = y_data["Date"].dt.strftime("%Y%m%d")
-        #     df_y["<TIME>"] = "000000"
-        #     df_y["<OPEN>"] = y_data["Open"]
-        #     df_y["<HIGH>"] = y_data["High"]
-        #     df_y["<LOW>"] = y_data["Low"]
-        #     df_y["<CLOSE>"] = y_data["Close"]
-        #     df_y["<VOL>"] = y_data["Volume"]
-
-        #     # Filter to ensure no overlap (strictly less than finam_min_date)
-        #     if finam_min_date:
-        #         df_y = df_y[pd.to_datetime(df_y["<DATE>"], format="%Y%m%d") < finam_min_date]
-
-        #     if not df_y.empty:
-        #         log.info(f"Added {len(df_y)} records from Yahoo Finance for {ticker}")
-        #         if ticker_data is None:
-        #             ticker_data = df_y
-        #         else:
-        #             ticker_data = pd.concat([df_y, ticker_data], ignore_index=True)
-        #     else:
-        #         log.warning(f"Yahoo data for {ticker} was empty after filtering.")
-
 
         if total_df is None:
             total_df = ticker_data
@@ -323,7 +262,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
         # 1. Try to download from Smart-Lab
         try:
             url = f"https://smart-lab.ru/q/{company}/f/q/MSFO/download/"
-            req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
 
             with urlopen(req) as response:
                 content = response.read()
@@ -339,7 +278,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
 
                     log.info(f"Updated multipliers backup for {company}")
 
-                df = pd.read_csv(BytesIO(content), sep=';')
+                df = pd.read_csv(BytesIO(content), sep=";")
             else:
                 log.warning(f"Downloaded content for {company} does not look like CSV")
 
@@ -358,20 +297,20 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
         # 3. Process DataFrame
         try:
             # Ensure first column is 'characteristic'
-            df.columns = ['characteristic'] + list(df.columns[1:])
+            df.columns = ["characteristic"] + list(df.columns[1:])
 
             # Apply mapping
-            df['characteristic'] = df['characteristic'].map(lambda x: smartlab_mapping.get(x, x))
+            df["characteristic"] = df["characteristic"].map(lambda x: smartlab_mapping.get(x, x))
 
             # Filter rows
-            df = df[df['characteristic'].isin(multipliers)]
+            df = df[df["characteristic"].isin(multipliers)]
 
             if df.empty:
                 log.warning(f"No valid multipliers found for {company}")
                 continue
 
             # Rename columns (dates)
-            new_cols = {'characteristic': 'characteristic'}
+            new_cols = {"characteristic": "characteristic"}
             for col in df.columns[1:]:
                 # Try DD.MM.YYYY
                 try:
@@ -384,7 +323,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
 
                 # Try YYYYQ#
                 try:
-                    if len(col) == 6 and col[4] == 'Q':
+                    if len(col) == 6 and col[4] == "Q":
                         year = int(col[:4])
                         q = int(col[5])
                         new_cols[col] = f"{year}_{q}"
@@ -395,7 +334,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
             df = df.rename(columns=new_cols)
 
             # Keep only valid columns (YYYY_Q)
-            valid_cols = ['characteristic'] + [c for c in df.columns if '_' in c and c != 'characteristic']
+            valid_cols = ["characteristic"] + [c for c in df.columns if "_" in c and c != "characteristic"]
             df = df[valid_cols]
 
             tmp = df.assign(company=company)
@@ -408,22 +347,11 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
     if macro is None:
         return pd.DataFrame()
 
-    macro = macro.rename(
-        columns={
-            f"{year}Q{q}": f"{year}_{q}"
-            for year in range(2000, 2030)
-            for q in range(1, 5)
-        }
-    )
+    macro = macro.rename(columns={f"{year}Q{q}": f"{year}_{q}" for year in range(2000, 2030) for q in range(1, 5)})
 
     macro = macro[
         ["company", "characteristic"]
-        + [
-            f"{year}_{q}"
-            for year in range(2014, 2030)
-            for q in range(1, 5)
-            if f"{year}_{q}" in macro.columns
-        ]
+        + [f"{year}_{q}" for year in range(2014, 2030) for q in range(1, 5) if f"{year}_{q}" in macro.columns]
     ]
 
     return macro
@@ -432,20 +360,15 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
 def get_rubusd_exchange_rate(
     dt_calc: str, dt_start: str, update_backup: bool = False, use_backup: bool = False
 ) -> pd.DataFrame:
-    rubusd_df_path = f"data/macro/rubusd.csv"
+    rubusd_df_path = "data/macro/rubusd.csv"
 
     if use_backup:
         if not os.path.exists(rubusd_df_path):
-            log.error(
-                f"Backup file for usd/rub exchange rates not found. Please, update it."
-            )
+            log.error("Backup file for usd/rub exchange rates not found. Please, update it.")
             return
 
         rates = pd.read_csv(rubusd_df_path)
-        log.info(
-            f"Exchange rates for usd/rub will be use from backup."
-            f" Last actual date: {rates.date.max()}"
-        )
+        log.info(f"Exchange rates for usd/rub will be use from backup." f" Last actual date: {rates.date.max()}")
 
         return rates
 
@@ -466,16 +389,12 @@ def get_rubusd_exchange_rate(
 
     if missing_dates:
         rates_additional = []
-        log.info(
-            f"Downloading {len(missing_dates)} missing usd/rub exchange rates"
-        )
+        log.info(f"Downloading {len(missing_dates)} missing usd/rub exchange rates")
         for date in tqdm(missing_dates):
             for attempt in range(3):
                 try:
                     rate = float(ExchangeRates(date)["USD"].value)
-                    rates_additional.append(
-                        (date.strftime("%Y-%m-%d"), rate)
-                    )
+                    rates_additional.append((date.strftime("%Y-%m-%d"), rate))
                     break
                 except Exception as e:
                     if attempt == 2:
@@ -510,18 +429,21 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str, update
         update_backup (bool): If True, saves the downloaded data to output_path. Defaults to True.
 
     Returns:
-        pd.DataFrame: Inflation data with columns 'Дата', 'Ключевая ставка, % годовых', 'Инфляция, % г/г', 'Цель по инфляции'
+        pd.DataFrame: Inflation data with columns 'Дата', 'Ключевая ставка, % годовых',
+        'Инфляция, % г/г', 'Цель по инфляции'
     """
     import urllib.request
 
-    start_date = datetime.strptime(dt_start, '%Y-%m-%d')
-    end_date = datetime.strptime(dt_calc, '%Y-%m-%d')
+    start_date = datetime.strptime(dt_start, "%Y-%m-%d")
+    end_date = datetime.strptime(dt_calc, "%Y-%m-%d")
 
-    start_str = start_date.strftime('%m%%2F%d%%2F%Y')
-    end_str = end_date.strftime('%m%%2F%d%%2F%Y')
-    url = f"https://www.cbr.ru/Queries/UniDbQuery/DownloadExcel/132934?FromDate={start_str}&ToDate={end_str}&posted=False"
+    start_str = start_date.strftime("%m%%2F%d%%2F%Y")
+    end_str = end_date.strftime("%m%%2F%d%%2F%Y")
+    url = (
+        f"https://www.cbr.ru/Queries/UniDbQuery/DownloadExcel/132934?FromDate={start_str}&ToDate={end_str}&posted=False"
+    )
 
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     req = urllib.request.Request(url, headers=headers)
 
     for attempt in range(3):
@@ -534,27 +456,29 @@ def get_cbr_inflation_data(output_path: str, dt_start: str, dt_calc: str, update
                 log.error(f"Failed to download inflation data: {e}")
                 if os.path.exists(output_path):
                     return pd.read_excel(output_path)
-                return pd.DataFrame({
-                    'Дата': pd.Series(dtype='datetime64[ns]'),
-                    'Ключевая ставка, % годовых': pd.Series(dtype='float64'),
-                    'Инфляция, % г/г': pd.Series(dtype='float64'),
-                    'Цель по инфляции': pd.Series(dtype='float64')
-                })
+                return pd.DataFrame(
+                    {
+                        "Дата": pd.Series(dtype="datetime64[ns]"),
+                        "Ключевая ставка, % годовых": pd.Series(dtype="float64"),
+                        "Инфляция, % г/г": pd.Series(dtype="float64"),
+                        "Цель по инфляции": pd.Series(dtype="float64"),
+                    }
+                )
             time.sleep(2)
 
     df = pd.read_excel(excel_data, dtype=str)
     df.columns = df.columns.str.strip()
 
-    date_col = next((col for col in df.columns if 'Дата' in col or 'дата' in col.lower()), None)
+    date_col = next((col for col in df.columns if "Дата" in col or "дата" in col.lower()), None)
     if date_col:
-        df = df.rename(columns={date_col: 'Дата'})
+        df = df.rename(columns={date_col: "Дата"})
 
-    df['Дата'] = pd.to_datetime(df['Дата'], format='%m.%Y', errors='coerce')
-    df = df[df['Дата'].notna()]
+    df["Дата"] = pd.to_datetime(df["Дата"], format="%m.%Y", errors="coerce")
+    df = df[df["Дата"].notna()]
 
-    for col in ['Ключевая ставка, % годовых', 'Инфляция, % г/г', 'Цель по инфляции']:
+    for col in ["Ключевая ставка, % годовых", "Инфляция, % г/г", "Цель по инфляции"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if update_backup:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -577,8 +501,10 @@ def get_unemployment_data(output_path: str, update_backup: bool = True) -> pd.Da
     try:
         from tvDatafeed import TvDatafeed, Interval
     except ImportError:
-        log.error("tvDatafeed library not found. Please install it using: \n"
-                  "pip install https://github.com/rongardF/tvdatafeed/archive/refs/heads/main.zip")
+        log.error(
+            "tvDatafeed library not found. Please install it using: \n"
+            "pip install https://github.com/rongardF/tvdatafeed/archive/refs/heads/main.zip"
+        )
         if os.path.exists(output_path):
             return pd.read_excel(output_path)
         return pd.DataFrame()
@@ -586,12 +512,7 @@ def get_unemployment_data(output_path: str, update_backup: bool = True) -> pd.Da
     try:
         tv = TvDatafeed()
         # RUUR - Russian Unemployment Rate
-        df = tv.get_hist(
-            symbol='RUUR',
-            exchange='ECONOMICS',
-            interval=Interval.in_monthly,
-            n_bars=5000
-        )
+        df = tv.get_hist(symbol="RUUR", exchange="ECONOMICS", interval=Interval.in_monthly, n_bars=5000)
 
         if df is None or df.empty:
             log.error("Failed to download data from TradingView.")
@@ -601,8 +522,8 @@ def get_unemployment_data(output_path: str, update_backup: bool = True) -> pd.Da
 
         df = df.reset_index()
         # Returning monthly data as requested by user
-        monthly_df = df[['datetime', 'close']].copy()
-        monthly_df.columns = ['Date', 'Unemployment']
+        monthly_df = df[["datetime", "close"]].copy()
+        monthly_df.columns = ["Date", "Unemployment"]
 
         if update_backup:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
