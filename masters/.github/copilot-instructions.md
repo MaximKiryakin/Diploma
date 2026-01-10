@@ -27,5 +27,5 @@ Follow the **Conventional Commits 1.0.0** specification:
   - `perf`: Code changes that improve performance
   - `test`: Adding missing tests
   - `chore`: Changes to the build process or auxiliary tools/libraries
-- **Rule**: Description must be in English, lowercase, and no period at the end.
+- **Rule**: Description must be in English, lowercase, and ; at the end.
 - **Example**: `feat(portfolio): add merton model calculation`
