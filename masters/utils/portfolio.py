@@ -14,7 +14,7 @@ from statsmodels.tsa.api import VAR
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from prophet import Prophet
 import os
-from scipy.optimize import root
+from scipy.optimize import root, minimize
 from scipy.stats import norm
 import numpy as np
 import pandas as pd
@@ -877,6 +877,155 @@ class Portfolio:
         self.d["dd_backtest"] = pd.concat(all_results, ignore_index=True)
         return self
 
+    def optimize_portfolio(self, lambda_risk: float = 0.5, lgd: float = 0.4, use_forecast: bool = True) -> "Portfolio":
+        """
+        Optimizes portfolio weights to minimize risk (volatility + expected loss).
+
+        Args:
+            lambda_risk (float): Risk aversion parameter (0 to 1).
+                                 High lambda favors lower volatility (unexpected loss).
+            lgd (float): Loss Given Default.
+            use_forecast (bool): If True, uses predicted PDs from self.d['pd_forecast'] or self.d['dd_forecast'].
+
+        Returns:
+            Portfolio: Self with optimized weights in self.d['optimized_weights'].
+        """
+        # 1. Get PDs for optimization
+        if use_forecast and "dd_forecast" in self.d:
+            current_pd_series = self.d["dd_forecast"]["predicted_pd"]
+            tickers = current_pd_series.index.tolist()
+            pds = current_pd_series.values
+            log.info("Using predicted PDs (from DD model) for optimization.")
+        elif use_forecast and "pd_forecast" in self.d:
+            current_pd_series = self.d["pd_forecast"]["predicted_pd"]
+            tickers = current_pd_series.index.tolist()
+            pds = current_pd_series.values
+            log.info("Using predicted PDs for optimization.")
+        else:
+            portfolio_df = self.d["portfolio"]
+            latest_date = portfolio_df["date"].max()
+            current_pd_df = portfolio_df[portfolio_df["date"] == latest_date][["ticker", "PD"]]
+            tickers = current_pd_df["ticker"].tolist()
+            pds = current_pd_df["PD"].values
+            log.info("Using historical PDs for optimization.")
+
+        # 2. Calculate Covariance matrix of asset returns proxy (stock log-returns)
+        returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
+        returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
+
+        # Ensure we only use tickers present in both
+        common_tickers = [t for t in tickers if t in returns_df.columns]
+        if len(common_tickers) < len(tickers):
+            missing = set(tickers) - set(common_tickers)
+            log.warning("Some tickers missing returns data: %s. Using subset.", missing)
+
+        tickers = common_tickers
+        if use_forecast and ("dd_forecast" in self.d or "pd_forecast" in self.d):
+            pds = current_pd_series.loc[tickers].values
+        else:
+            pds = current_pd_df.set_index("ticker").loc[tickers]["PD"].values
+
+        cov_matrix = returns_df[tickers].cov().values * 252  # Annualized
+        n = len(tickers)
+
+        # 3. Objective function: lambda * sqrt(w' * Cov * w) + (1 - lambda) * sum(w_i * pd_i * lgd)
+        def objective(w):
+            port_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
+            expected_loss = np.sum(w * pds * lgd)
+            return lambda_risk * port_vol + (1 - lambda_risk) * expected_loss
+
+        # 4. Constraints: sum(w) = 1, w_i >= 0
+        constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+        bounds = tuple((0, 1) for _ in range(n))
+        initial_guess = np.array([1.0 / n] * n)
+
+        res = minimize(
+            objective,
+            initial_guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-9},
+        )
+
+        if not res.success:
+            log.error("Portfolio optimization failed: %s", res.message)
+            return self
+
+        self.d["optimized_weights"] = pd.Series(res.x, index=tickers, name="weight")
+        log.info("Portfolio optimization completed successfully (Lambda=%.2f).", lambda_risk)
+
+        return self
+
+    def calc_portfolio_metrics(self, lgd: float = 0.4) -> "Portfolio":
+        """
+        Calculates key risk metrics for the optimized portfolio.
+
+        Args:
+            lgd (float): Loss Given Default.
+
+        Returns:
+            Portfolio: Self with metrics stored in self.d['portfolio_metrics'].
+        """
+        if "optimized_weights" not in self.d:
+            log.error("No optimized weights found. Run optimize_portfolio() first.")
+            return self
+
+        weights = self.d["optimized_weights"]
+        tickers = weights.index.tolist()
+
+        # Get PDs used (from forecast or historical)
+        if "dd_forecast" in self.d:
+            pds = self.d["dd_forecast"]["predicted_pd"].loc[tickers]
+        elif "pd_forecast" in self.d:
+            pds = self.d["pd_forecast"]["predicted_pd"].loc[tickers]
+        else:
+            latest_date = self.d["portfolio"]["date"].max()
+            pds = self.d["portfolio"][self.d["portfolio"]["date"] == latest_date].set_index("ticker").loc[tickers]["PD"]
+
+        # 1. Expected Loss
+        portfolio_el = np.sum(weights * pds * lgd)
+
+        # 2. Portfolio Volatility (Unexpected Loss proxy)
+        returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
+        returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
+        cov_matrix = returns_df[tickers].cov().values * 252
+        portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+
+        # 3. Diversification index (Herfindahl-Hirschman Index for weights)
+        hhi = np.sum(weights**2)
+        effective_n = 1.0 / hhi if hhi > 0 else 0
+
+        metrics = {
+            "Expected Loss (%)": portfolio_el * 100,
+            "Volatility (%)": portfolio_vol * 100,
+            "HHI Index": hhi,
+            "Effective N": effective_n,
+        }
+
+        self.d["portfolio_metrics"] = pd.Series(metrics)
+        log.log_dataframe(pd.DataFrame([metrics]).T, title="Portfolio Management Metrics")
+
+        return self
+
+    def plot_portfolio_allocation(self, figsize: tuple = (10, 6), verbose: bool = False) -> "Portfolio":
+        """
+        Plots the optimized portfolio allocation.
+
+        Args:
+            figsize (tuple): Figure size.
+            verbose (bool): Whether to show the plot.
+
+        Returns:
+            Portfolio: Self.
+        """
+        if "optimized_weights" not in self.d:
+            log.error("No optimized weights found. Run optimize_portfolio() first.")
+            return self
+
+        plots.plot_portfolio_allocation(self.d["optimized_weights"], figsize=figsize, verbose=verbose)
+        return self
+
     def plot_macro_forecast(
         self,
         horizon: int = 1,
@@ -1002,6 +1151,138 @@ class Portfolio:
             return self
 
         plots.plot_dd_forecast(self.d["dd_forecast"], figsize=figsize, verbose=verbose)
+        return self
+
+    def backtest_portfolio_strategies(
+        self, n_months: int = 3, lambda_risk: float = 0.5, lgd: float = 0.4, model_type: str = "var"
+    ) -> "Portfolio":
+        """
+        Backtests and compares Active Management vs. Passive (Equal Weights) strategy.
+
+        Args:
+            n_months (int): Number of months to backtest (walking forward).
+            lambda_risk (float): Risk aversion for active optimization.
+            lgd (float): Loss Given Default.
+            model_type (str): Macro model used for forecasts.
+
+        Returns:
+            Portfolio: Self with results stored in self.d['strategy_backtest'].
+        """
+        log.info(f"Starting strategy backtest for the last {n_months} months...")
+
+        # 1. Prepare monthly data
+        prices_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
+        monthly_prices = prices_pivot.resample("ME").last()
+        monthly_returns = monthly_prices.pct_change().dropna()
+
+        pd_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="PD")
+        monthly_pds = pd_pivot.resample("ME").last().dropna()
+
+        # Align history
+        common_index = monthly_returns.index.intersection(monthly_pds.index)
+        monthly_returns = monthly_returns.loc[common_index]
+        monthly_pds = monthly_pds.loc[common_index]
+
+        results = []
+
+        # 2. Historical Baseline (BEFORE backtest)
+        hist_returns = monthly_returns.iloc[:-n_months]
+        for date in hist_returns.index:
+            available_tickers = monthly_returns.columns[monthly_returns.loc[date].notna()]
+            n = len(available_tickers)
+            if n == 0:
+                continue
+
+            w_eq = 1.0 / n
+            ret_eq = (monthly_returns.loc[date, available_tickers] * w_eq).sum()
+            el_eq = (monthly_pds.loc[date, available_tickers] * w_eq).sum() * lgd
+
+            results.append(
+                {
+                    "Date": date,
+                    "Active_Return": ret_eq,  # No active strategy yet
+                    "Active_EL": el_eq,
+                    "Passive_Return": ret_eq,
+                    "Passive_EL": el_eq,
+                    "Actual_PD": monthly_pds.loc[date].mean(),
+                }
+            )
+
+        # 3. Walk-forward Backtest loop (ACTIVE)
+        if len(monthly_returns) < n_months:
+            log.error(f"Insufficient history for {n_months} months backtest.")
+            return self
+
+        for offset in range(n_months, 0, -1):
+            target_date = monthly_returns.index[-offset]
+            log.info(f"Backtesting month: {target_date.strftime('%Y-%m')}")
+
+            # --- STRATEGY 1: ACTIVE MANAGEMENT ---
+            self.predict_dd(horizon=1, training_offset=offset, model_type=model_type)
+            self.optimize_portfolio(lambda_risk=lambda_risk, lgd=lgd, use_forecast=True)
+            active_weights = self.d["optimized_weights"]
+
+            available_tickers = active_weights.index.intersection(monthly_returns.columns)
+            w_active = active_weights.loc[available_tickers]
+            w_active = w_active / w_active.sum()
+
+            ret_active = np.sum(w_active * monthly_returns.loc[target_date, available_tickers])
+            el_active = np.sum(w_active * monthly_pds.loc[target_date, available_tickers] * lgd)
+
+            # --- STRATEGY 2: PASSIVE (EQUAL WEIGHTS) ---
+            n_tickers = len(available_tickers)
+            w_passive = pd.Series(1.0 / n_tickers, index=available_tickers)
+
+            ret_passive = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
+            el_passive = np.sum(w_passive * monthly_pds.loc[target_date, available_tickers] * lgd)
+
+            results.append(
+                {
+                    "Date": target_date,
+                    "Active_Return": ret_active,
+                    "Active_EL": el_active,
+                    "Passive_Return": ret_passive,
+                    "Passive_EL": el_passive,
+                    "Actual_PD": monthly_pds.loc[target_date].mean(),
+                }
+            )
+
+        backtest_df = pd.DataFrame(results).set_index("Date")
+
+        # 4. Summary (only for backtest period)
+        bt_only = backtest_df.tail(n_months)
+        summary = {
+            "Total Return (%)": [
+                ((1 + bt_only["Active_Return"]).prod() - 1) * 100,
+                ((1 + bt_only["Passive_Return"]).prod() - 1) * 100,
+            ],
+            "Avg Realized EL (%)": [
+                bt_only["Active_EL"].mean() * 100,
+                bt_only["Passive_EL"].mean() * 100,
+            ],
+            "Realized Volatility (%)": [
+                bt_only["Active_Return"].std() * np.sqrt(12) * 100,
+                bt_only["Passive_Return"].std() * np.sqrt(12) * 100,
+            ],
+        }
+
+        self.d["strategy_backtest"] = backtest_df
+        self.d["strategy_comparison"] = pd.DataFrame(summary, index=["Active (Optimized)", "Passive (Equal)"])
+
+        log.info("Strategy backtest completed.")
+        return self
+
+    def plot_strategy_backtest(self, tail: int = 12, verbose: bool = False):
+        """
+        Plots the comparison of cumulative returns and EL between strategies.
+        """
+        if "strategy_backtest" not in self.d:
+            log.error("No strategy backtest results found.")
+            return self
+
+        plots.plot_strategy_comparison(
+            self.d["strategy_backtest"], self.d["strategy_comparison"], tail=tail, verbose=verbose
+        )
         return self
 
     def plot_ticker_dashboards(self, tickers: list, figsize_row: tuple = (18, 5), verbose: bool = False) -> "Portfolio":

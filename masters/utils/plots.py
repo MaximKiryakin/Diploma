@@ -671,3 +671,119 @@ def plot_dd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbos
         plt.clf()
     plt.close()
     log.info(f"DD forecast comparison plot saved: {save_path}")
+
+
+def plot_portfolio_allocation(weights: pd.Series, figsize: tuple = (10, 6), verbose: bool = False):
+    """
+    Plots a bar chart of portfolio weights.
+
+    Args:
+        weights (pd.Series): Optimized weights by ticker.
+        figsize (tuple): Figure size.
+        verbose (bool): Whether to show the plot.
+    """
+    if weights.empty:
+        log.warning("Weights series is empty. Cannot plot allocation.")
+        return
+
+    df = weights[weights > 0.001].sort_values(ascending=False).reset_index()
+    df.columns = ["ticker", "weight"]
+
+    plt.figure(figsize=figsize, dpi=150)
+    sns.barplot(data=df, x="ticker", y="weight", palette="viridis")
+
+    plt.title("Optimized Portfolio Allocation", fontsize=14, pad=15)
+    plt.ylabel("Weight", fontsize=12)
+    plt.xlabel("Ticker", fontsize=12)
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+
+    save_path = "logs/graphs/portfolio_allocation.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+    log.info(f"Portfolio allocation plot saved: {save_path}")
+
+
+def plot_strategy_comparison(
+    backtest_df: pd.DataFrame, comparison_df: pd.DataFrame, tail: int = 12, verbose: bool = False
+):
+    """
+    Plots the cumulative returns and realized EL comparison between strategies.
+    Inclues history trailing and actual PD.
+    """
+    if backtest_df.empty:
+        log.warning("Strategy backtest DataFrame is empty.")
+        return
+
+    # Slice history
+    plot_df = backtest_df.tail(tail) if tail > 0 else backtest_df
+
+    # Calculate cumulative returns starting from the view window
+    plot_df = plot_df.copy()
+    plot_df["Active_CumRet"] = (1 + plot_df["Active_Return"]).cumprod() - 1
+    plot_df["Passive_CumRet"] = (1 + plot_df["Passive_Return"]).cumprod() - 1
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), sharex=True)
+
+    # 1. Cumulative Returns Plot
+    ax1.plot(
+        plot_df.index, plot_df["Active_CumRet"] * 100, label="Active (Optimized)", linewidth=3, marker="o", markersize=4
+    )
+    ax1.plot(
+        plot_df.index, plot_df["Passive_CumRet"] * 100, label="Passive (Equal)", linewidth=2, linestyle="--", alpha=0.8
+    )
+
+    ax1.set_title("Strategy Backtest: Cumulative Returns (%)", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Return (%)", fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left")
+
+    # 2. Predicted vs Realized Risk Plot (EL & Actual PD)
+    # Scale to basis points or percentages
+    ax2.plot(plot_df.index, plot_df["Active_EL"] * 100, label="Active Realized EL (%)", color="red", linewidth=2)
+    ax2.plot(plot_df.index, plot_df["Passive_EL"] * 100, label="Passive Realized EL (%)", color="gray", linestyle="--")
+
+    if "Actual_PD" in plot_df.columns:
+        ax2.bar(
+            plot_df.index, plot_df["Actual_PD"] * 100, label="Portfolio Avg PD (%)", color="blue", alpha=0.15, width=20
+        )
+
+    ax2.set_title("Portfolio Credit Risk: Realized EL and Average PD", fontsize=14, fontweight="bold")
+    ax2.set_ylabel("Loss / Probability (%)", fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper left")
+
+    # Add vertical line for backtest start
+    # Find the date where strategies start to differ (end of baseline)
+    diff = backtest_df["Active_Return"] != backtest_df["Passive_Return"]
+    if diff.any():
+        backtest_start_date = backtest_df.index[diff.argmax()]
+    else:
+        backtest_start_date = None
+
+    if backtest_start_date and backtest_start_date in plot_df.index:
+        for ax in [ax1, ax2]:
+            ax.axvline(x=backtest_start_date, color="black", linestyle=":", alpha=0.5)
+            ax.text(backtest_start_date, ax.get_ylim()[1], " Backtest Start", verticalalignment="top")
+
+    plt.xlabel("Date", fontsize=12)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    save_path = "logs/graphs/strategy_backtest_comparison.png"
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, bbox_inches="tight")
+
+    if verbose:
+        plt.show()
+    else:
+        plt.clf()
+    plt.close()
+    log.info(f"Strategy comparison plot saved: {save_path}")
