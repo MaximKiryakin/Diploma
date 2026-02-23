@@ -29,6 +29,17 @@ log = Logger(__name__)
 
 
 class Portfolio:
+    # --- Constants ---
+    TRADING_DAYS_PER_YEAR: int = 252
+    TRADING_DAYS_PER_MONTH: int = 21
+    MONTHS_PER_YEAR: int = 12
+    BILLION: float = 1e9
+    EPSILON: float = 1e-6
+    DEFAULT_LGD: float = 0.4
+    DEFAULT_LAMBDA_RISK: float = 0.5
+    DEFAULT_VOLATILITY: float = 0.4
+    ROLLING_VOL_WINDOW: int = 63
+
     def __init__(self, dt_calc: str, dt_start: str, stocks_step: int, tickers_list: list[str]):
         self.dt_calc = dt_calc
         self.dt_start = dt_start
@@ -410,7 +421,7 @@ class Portfolio:
                     self.d["portfolio"][col] = self.d["portfolio"][col].replace(0, np.nan)
 
                 if "млрд руб" in col:
-                    self.d["portfolio"][col] *= 1e9
+                    self.d["portfolio"][col] *= self.BILLION
 
         self.d["portfolio"]["debt"] = np.select(
             [
@@ -482,7 +493,7 @@ class Portfolio:
 
         def equations(vars, E_i, D_i, r_i, sigma_E_i, T_i):
             V, sigma_V = vars
-            d1 = np.log(V / D_i if D_i != 0 else 1e-6) + (r_i + 0.5 * sigma_V**2) * T_i
+            d1 = np.log(V / D_i if D_i != 0 else Portfolio.EPSILON) + (r_i + 0.5 * sigma_V**2) * T_i
             d1 /= sigma_V * np.sqrt(T_i)
             N_d1 = norm.cdf(d1)
             eq1 = V * N_d1 - D_i * np.exp(-r_i * T_i) * norm.cdf(d1 - sigma_V * np.sqrt(T_i)) - E_i
@@ -511,7 +522,7 @@ class Portfolio:
             ]
         )
 
-        self.d["portfolio"]["V"] = np.where(results[:, 0] <= 0, 1e-6, results[:, 0])
+        self.d["portfolio"]["V"] = np.where(results[:, 0] <= 0, self.EPSILON, results[:, 0])
         self.d["portfolio"]["sigma_V"] = results[:, 1]
 
         log.info("Capital cost and capital volatility calculated.")
@@ -534,7 +545,8 @@ class Portfolio:
         sigma_V = self.d["portfolio"]["sigma_V"]
 
         d2 = (
-            np.log(V / np.where(D != 0, D, 1e-6)) + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
+            np.log(V / np.where(D != 0, D, self.EPSILON))
+            + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
         ) / (sigma_V * np.sqrt(T))
         self.d["portfolio"]["PD"] = norm.cdf(-d2)
         self.d["portfolio"]["DD"] = d2
@@ -561,32 +573,33 @@ class Portfolio:
         """
         Adds dynamic features to the portfolio data.
 
+        Computes EWMA (Exponentially Weighted Moving Average) annualized
+        volatility per ticker with span=ROLLING_VOL_WINDOW trading days.
+        EWMA gives more weight to recent observations, making the
+        volatility estimate more reactive to stress periods (e.g., Feb 2022)
+        compared to a simple rolling window.
+
         Returns:
             Portfolio: Updated portfolio with added dynamic features.
         """
+        df = self.d["portfolio"].sort_values(["ticker", "date"]).copy()
 
-        self.d["portfolio"]["log_return"] = (
-            self.d["portfolio"].groupby("ticker")["close"].transform(lambda x: np.log(x / x.shift(1)))
-        )
+        # Daily log-returns per ticker
+        df["log_return"] = df.groupby("ticker")["close"].transform(lambda x: np.log(x / x.shift(1)))
 
-        # Calculate monthly volatility for each month
-        # std(daily_returns) * sqrt(21) -> Monthly Volatility
-        monthly_vol = self.d["portfolio"].groupby(["ticker", pd.Grouper(key="date", freq="ME")])[
-            "log_return"
-        ].std() * np.sqrt(21)
+        # EWMA annualized volatility: ewm_std(daily) * sqrt(252)
+        # EWMA reacts faster to volatility shocks than simple rolling std
+        df["volatility"] = df.groupby("ticker")["log_return"].transform(
+            lambda x: x.ewm(span=self.ROLLING_VOL_WINDOW, min_periods=self.TRADING_DAYS_PER_MONTH).std()
+        ) * np.sqrt(self.TRADING_DAYS_PER_YEAR)
 
-        avg_monthly_vol = monthly_vol.groupby("ticker").mean()
+        # Fill leading NaNs (before the first full window) with the ticker's first valid value, then global mean
+        df["volatility"] = df.groupby("ticker")["volatility"].transform(lambda x: x.bfill())
+        global_avg_vol = df["volatility"].mean()
+        df["volatility"] = df["volatility"].fillna(global_avg_vol).fillna(self.DEFAULT_VOLATILITY)
 
-        # Annualize volatility: Monthly * sqrt(12)
-        # Merton model requires annualized volatility
-        avg_annual_vol = avg_monthly_vol * np.sqrt(12)
-        global_avg_vol = avg_annual_vol.mean()
-
-        self.d["portfolio"] = (
-            self.d["portfolio"]
-            .assign(volatility=lambda x: x["ticker"].map(avg_annual_vol).fillna(global_avg_vol).fillna(0.4))
-            .drop(columns=["log_return"])
-        )
+        df = df.drop(columns=["log_return"])
+        self.d["portfolio"] = df
 
         log.log_missing_values_summary(
             self.d["portfolio"], title="Portfolio Missing Values After Adding dynamic features"
@@ -925,7 +938,7 @@ class Portfolio:
         else:
             pds = current_pd_df.set_index("ticker").loc[tickers]["PD"].values
 
-        cov_matrix = returns_df[tickers].cov().values * 252  # Annualized
+        cov_matrix = returns_df[tickers].cov().values * self.TRADING_DAYS_PER_YEAR  # Annualized
         n = len(tickers)
 
         # 3. Objective function: lambda * sqrt(w' * Cov * w) + (1 - lambda) * sum(w_i * pd_i * lgd)
@@ -989,7 +1002,7 @@ class Portfolio:
         # 2. Portfolio Volatility (Unexpected Loss proxy)
         returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
         returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
-        cov_matrix = returns_df[tickers].cov().values * 252
+        cov_matrix = returns_df[tickers].cov().values * self.TRADING_DAYS_PER_YEAR
         portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
 
         # 3. Diversification index (Herfindahl-Hirschman Index for weights)
@@ -1154,21 +1167,48 @@ class Portfolio:
         return self
 
     def backtest_portfolio_strategies(
-        self, n_months: int = 3, lambda_risk: float = 0.5, lgd: float = 0.4, model_type: str = "var"
+        self,
+        n_months: int = 3,
+        lambda_risk: float = 0.5,
+        lgd: float = 0.4,
+        model_type: str = "var",
+        rebalance_threshold: float = 0.05,
+        transaction_cost: float = 0.001,
     ) -> "Portfolio":
         """
-        Backtests and compares Active Management vs. Passive (Equal Weights) strategy.
+        Backtests Active (threshold-rebalanced) vs Passive (equal weights) strategy.
+
+        Active strategy tracks actual weight drift after each period and only
+        rebalances when any weight deviates from the optimized target by more
+        than ``rebalance_threshold``.  Transaction costs are proportional to
+        the total absolute turnover.
+
+        Threshold rebalancing rule:
+            Rebalance if  max_i |w_i^actual - w_i^target| > delta
+
+        Weight drift formula each period:
+            w_i^actual(t) = w_i(t-1) * (1 + r_i(t)) / sum_j w_j(t-1) * (1 + r_j(t))
+
+        Transaction cost:
+            TC(t) = c * sum_i |w_i^new(t) - w_i^actual(t)|
 
         Args:
-            n_months (int): Number of months to backtest (walking forward).
+            n_months (int): Number of months for the backtest window.
             lambda_risk (float): Risk aversion for active optimization.
             lgd (float): Loss Given Default.
             model_type (str): Macro model used for forecasts.
+            rebalance_threshold (float): Max allowed drift before rebalancing (0-1).
+                E.g. 0.05 means rebalance when any weight drifts >5 pp.
+            transaction_cost (float): One-way proportional cost per unit of turnover.
+                E.g. 0.001 = 10 basis points round-trip.
 
         Returns:
             Portfolio: Self with results stored in self.d['strategy_backtest'].
         """
-        log.info(f"Starting strategy backtest for the last {n_months} months...")
+        log.info(
+            f"Starting strategy backtest for the last {n_months} months "
+            f"(threshold={rebalance_threshold:.1%}, tc={transaction_cost:.4f})..."
+        )
 
         # 1. Prepare monthly data
         prices_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
@@ -1185,7 +1225,7 @@ class Portfolio:
 
         results = []
 
-        # 2. Historical Baseline (BEFORE backtest)
+        # 2. Historical Baseline (BEFORE backtest) -- both strategies equal-weight
         hist_returns = monthly_returns.iloc[:-n_months]
         for date in hist_returns.index:
             available_tickers = monthly_returns.columns[monthly_returns.loc[date].notna()]
@@ -1200,36 +1240,77 @@ class Portfolio:
             results.append(
                 {
                     "Date": date,
-                    "Active_Return": ret_eq,  # No active strategy yet
+                    "Active_Return": ret_eq,
                     "Active_EL": el_eq,
                     "Passive_Return": ret_eq,
                     "Passive_EL": el_eq,
                     "Actual_PD": monthly_pds.loc[date].mean(),
+                    "Turnover": 0.0,
+                    "TC": 0.0,
+                    "Rebalanced": False,
                 }
             )
 
-        # 3. Walk-forward Backtest loop (ACTIVE)
+        # 3. Walk-forward Backtest loop
         if len(monthly_returns) < n_months:
             log.error(f"Insufficient history for {n_months} months backtest.")
             return self
+
+        # State: current actual weights for active strategy (None = not yet initialized)
+        w_active_actual: pd.Series = None
+        w_target: pd.Series = None
+        total_rebalances = 0
 
         for offset in range(n_months, 0, -1):
             target_date = monthly_returns.index[-offset]
             log.info(f"Backtesting month: {target_date.strftime('%Y-%m')}")
 
-            # --- STRATEGY 1: ACTIVE MANAGEMENT ---
+            # --- Compute new TARGET weights from optimization ---
             self.predict_dd(horizon=1, training_offset=offset, model_type=model_type)
             self.optimize_portfolio(lambda_risk=lambda_risk, lgd=lgd, use_forecast=True)
-            active_weights = self.d["optimized_weights"]
+            w_target = self.d["optimized_weights"]
 
-            available_tickers = active_weights.index.intersection(monthly_returns.columns)
-            w_active = active_weights.loc[available_tickers]
-            w_active = w_active / w_active.sum()
+            available_tickers = w_target.index.intersection(monthly_returns.columns)
+            w_target = w_target.loc[available_tickers]
+            w_target = w_target / w_target.sum()
 
-            ret_active = np.sum(w_active * monthly_returns.loc[target_date, available_tickers])
-            el_active = np.sum(w_active * monthly_pds.loc[target_date, available_tickers] * lgd)
+            # --- STRATEGY 1: ACTIVE with Threshold Rebalancing ---
+            if w_active_actual is None:
+                # First period: initialize to target (full rebalance)
+                w_active_actual = w_target.copy()
+                turnover = w_target.abs().sum()  # Initial investment
+                rebalanced = True
+                total_rebalances += 1
+            else:
+                # Drift: update actual weights by realized returns
+                rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
 
-            # --- STRATEGY 2: PASSIVE (EQUAL WEIGHTS) ---
+                # Align to available tickers (handle new/removed tickers)
+                common = w_active_actual.index.intersection(available_tickers)
+                w_drifted = w_active_actual.reindex(available_tickers, fill_value=0.0)
+                w_drifted.loc[common] = w_active_actual.loc[common] * (1 + rets.loc[common])
+                total_val = w_drifted.sum()
+                w_drifted = w_drifted / total_val if total_val > 0 else w_target.copy()
+
+                # Check threshold: rebalance only if max drift exceeds delta
+                max_drift = (w_drifted - w_target).abs().max()
+
+                if max_drift > rebalance_threshold:
+                    turnover = (w_target - w_drifted).abs().sum()
+                    w_active_actual = w_target.copy()
+                    rebalanced = True
+                    total_rebalances += 1
+                    log.info(f"  Rebalancing triggered (max drift={max_drift:.2%}, " f"turnover={turnover:.2%})")
+                else:
+                    turnover = 0.0
+                    w_active_actual = w_drifted
+                    rebalanced = False
+
+            tc = transaction_cost * turnover
+            ret_active = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
+            el_active = np.sum(w_active_actual * monthly_pds.loc[target_date, available_tickers] * lgd)
+
+            # --- STRATEGY 2: PASSIVE (EQUAL WEIGHTS, no threshold needed) ---
             n_tickers = len(available_tickers)
             w_passive = pd.Series(1.0 / n_tickers, index=available_tickers)
 
@@ -1244,6 +1325,9 @@ class Portfolio:
                     "Passive_Return": ret_passive,
                     "Passive_EL": el_passive,
                     "Actual_PD": monthly_pds.loc[target_date].mean(),
+                    "Turnover": turnover,
+                    "TC": tc,
+                    "Rebalanced": rebalanced,
                 }
             )
 
@@ -1261,15 +1345,30 @@ class Portfolio:
                 bt_only["Passive_EL"].mean() * 100,
             ],
             "Realized Volatility (%)": [
-                bt_only["Active_Return"].std() * np.sqrt(12) * 100,
-                bt_only["Passive_Return"].std() * np.sqrt(12) * 100,
+                bt_only["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+                bt_only["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+            ],
+            "Total Transaction Cost (%)": [
+                bt_only["TC"].sum() * 100,
+                0.0,
+            ],
+            "Rebalances": [
+                int(bt_only["Rebalanced"].sum()),
+                0,
+            ],
+            "Avg Turnover (%)": [
+                bt_only["Turnover"].mean() * 100,
+                0.0,
             ],
         }
 
         self.d["strategy_backtest"] = backtest_df
         self.d["strategy_comparison"] = pd.DataFrame(summary, index=["Active (Optimized)", "Passive (Equal)"])
 
-        log.info("Strategy backtest completed.")
+        log.info(
+            f"Strategy backtest completed. Rebalances: {total_rebalances}/{n_months} "
+            f"(threshold={rebalance_threshold:.1%})"
+        )
         return self
 
     def plot_strategy_backtest(self, tail: int = 12, verbose: bool = False):
