@@ -15,6 +15,7 @@ log = Logger(__name__)
 def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple = (12, 5), verbose: bool = False):
     """
     Plots the probability of default (PD) for the given tickers.
+    Uses symmetric log scale to handle large PD spikes alongside near-zero values.
     """
 
     for ticker in tickers:
@@ -27,19 +28,24 @@ def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple
 
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
 
+        pd_pct = data["PD"] * 100
+
         ax.plot(
             data["date"],
-            data["PD"] * 100,
+            pd_pct,
             color="royalblue",
             linewidth=2,
             markersize=5,
         )
 
+        # Symmetric log scale: linear near zero (linthresh), log for large values
+        ax.set_yscale("symlog", linthresh=0.01)
+
         ax.set_title(f"Вероятность дефолта ({ticker})", fontsize=14, pad=10)
-        ax.set_xlabel("Дата", fontsize=12), ax.set_ylabel("PD, %", fontsize=12)
+        ax.set_xlabel("Дата", fontsize=12), ax.set_ylabel("PD, % (лог. шкала)", fontsize=12)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        plt.xticks(rotation=90), plt.grid(True, alpha=0.3), plt.tight_layout()
+        plt.xticks(rotation=90), plt.grid(True, alpha=0.3, which="both"), plt.tight_layout()
 
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -330,14 +336,15 @@ def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, 
 
 
 def plot_ticker_dashboards_grid(
-    portfolio_df: pd.DataFrame, tickers: list, figsize_row: tuple = (20, 5), verbose: bool = False
+    portfolio_df: pd.DataFrame, tickers: list, figsize_row: tuple = (26, 5), verbose: bool = False
 ):
     """
     Plots a multi-panel dashboard for each ticker.
-    One row per ticker: [Merton PD] | [Stock Price] | [Debt vs Assets]
+    One row per ticker: [DD] | [PD] | [Stock Price] | [Debt vs Assets]
     """
     n_tickers = len(tickers)
-    fig, axes = plt.subplots(n_tickers, 3, figsize=(figsize_row[0], figsize_row[1] * n_tickers))
+    n_cols = 4
+    fig, axes = plt.subplots(n_tickers, n_cols, figsize=(figsize_row[0], figsize_row[1] * n_tickers))
 
     # Handle single ticker case (axes becomes 1D)
     if n_tickers == 1:
@@ -348,22 +355,31 @@ def plot_ticker_dashboards_grid(
         if data.empty:
             continue
 
-        # 1. Merton PD (Column 0)
-        ax_pd = axes[i, 0]
-        ax_pd.plot(data["date"], data["PD"] * 100, color="crimson", linewidth=2)
+        # 1. Distance to Default DD (Column 0)
+        ax_dd = axes[i, 0]
+        ax_dd.plot(data["date"], data["DD"], color="crimson", linewidth=2)
+        ax_dd.axhline(y=0, color="black", linestyle="--", linewidth=0.8, alpha=0.5)
+        ax_dd.set_title(f"{ticker}: DD", fontsize=12, pad=10)
+        ax_dd.set_ylabel("DD (std. dev.)")
+        ax_dd.grid(True, alpha=0.3)
+
+        # 2. Probability of Default PD (Column 1)
+        ax_pd = axes[i, 1]
+        ax_pd.plot(data["date"], data["PD"] * 100, color="darkorange", linewidth=2)
+        ax_pd.set_yscale("symlog", linthresh=0.1)
         ax_pd.set_title(f"{ticker}: PD (%)", fontsize=12, pad=10)
         ax_pd.set_ylabel("PD, %")
-        ax_pd.grid(True, alpha=0.3)
+        ax_pd.grid(True, alpha=0.3, which="both")
 
-        # 2. Stock Price (Column 1)
-        ax_stock = axes[i, 1]
+        # 3. Stock Price (Column 2)
+        ax_stock = axes[i, 2]
         ax_stock.plot(data["date"], data["close"], color="royalblue", linewidth=2)
         ax_stock.set_title(f"{ticker}: Stock Price", fontsize=12, pad=10)
         ax_stock.set_ylabel("Price, RUB")
         ax_stock.grid(True, alpha=0.3)
 
-        # 3. Debt vs Assets (Column 2)
-        ax_debt = axes[i, 2]
+        # 4. Debt vs Assets (Column 3)
+        ax_debt = axes[i, 3]
         ax_debt.plot(data["date"], data["capitalization"], color="#2ecc71", label="Cap", linewidth=2)
         ax_debt.plot(data["date"], data["debt"], color="#e74c3c", label="Debt", linewidth=2)
         ax_debt.set_title(f"{ticker}: Cap vs Debt", fontsize=12, pad=10)
@@ -371,11 +387,11 @@ def plot_ticker_dashboards_grid(
         ax_debt.legend(fontsize=8)
         ax_debt.grid(True, alpha=0.3)
 
-        # Apply common date formatting to all 3 axes in the row
+        # Apply common date formatting to all axes in the row
         for ax in axes[i]:
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=8, maxticks=12))
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-            ax.tick_params(axis="x", rotation=90)
+            ax.tick_params(axis="x", rotation=90, labelsize=8)
 
     plt.tight_layout()
     save_path = "logs/graphs/ticker_dashboards.png"
