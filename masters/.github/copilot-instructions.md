@@ -3,6 +3,8 @@
 ## 1. General Interaction
 - **No Emojis**: Do not use smileys or emojis in any responses.
 - **Language**: Respond in the same language as the user (Russian), but all code artifacts (docstrings, comments) must be in English.
+- **Dialog closure**: Before finishing any assistant response, ALWAYS call the MCP server's ask_user_text method from the VS Code extension (mcp.ask_user_text) to ask: "Могу ли я закончить диалог?" Only finish the response after receiving the user's answer. Dialog can ONLY be closed through MCP with explicit "да" (yes) confirmation — never close directly or proceed without explicit user confirmation. If the user answers anything other than "да", the dialog must continue.
+- **MCP Question Rule**: Every response MUST end with the MCP question "Могу ли я закончить диалог?" without exception. This is the ONLY way to close a dialog.
 
 ## 2. Python Coding Standards
 - **Style Guide**: Follow PEP 8 strictly.
