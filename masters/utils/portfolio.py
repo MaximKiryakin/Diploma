@@ -14,7 +14,7 @@ from statsmodels.tsa.api import VAR
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from prophet import Prophet
 import os
-from scipy.optimize import root, minimize
+from scipy.optimize import root, minimize, linprog
 from scipy.stats import norm
 import numpy as np
 import pandas as pd
@@ -890,15 +890,43 @@ class Portfolio:
         self.d["dd_backtest"] = pd.concat(all_results, ignore_index=True)
         return self
 
-    def optimize_portfolio(self, lambda_risk: float = 0.5, lgd: float = 0.4, use_forecast: bool = True) -> "Portfolio":
-        """
-        Optimizes portfolio weights to minimize risk (volatility + expected loss).
+    def optimize_portfolio(
+        self,
+        lambda_risk: float = 0.5,
+        lgd: float = 0.4,
+        use_forecast: bool = True,
+        min_weight: float = 0.0,
+        max_weight: float = 1.0,
+        strategy: str = "mean_el",
+        cvar_alpha: float = 0.95,
+        cutoff_date: pd.Timestamp = None,
+    ) -> "Portfolio":
+        """Optimizes portfolio weights using the specified strategy.
+
+        Supported strategies:
+            - ``mean_el``  (default): minimizes lambda * portfolio_volatility +
+              (1 - lambda) * expected_loss.  Solved via SLSQP (QP).
+            - ``cvar``: minimizes CVaR_alpha of credit-adjusted portfolio losses
+              using the Rockafellar-Uryasev (2000) LP formulation.
+            - ``risk_parity``: equalizes credit-adjusted risk contributions
+              across all assets (Maillard, Roncalli & Teiletche, 2010).
 
         Args:
-            lambda_risk (float): Risk aversion parameter (0 to 1).
-                                 High lambda favors lower volatility (unexpected loss).
-            lgd (float): Loss Given Default.
-            use_forecast (bool): If True, uses predicted PDs from self.d['pd_forecast'] or self.d['dd_forecast'].
+            lambda_risk: Risk aversion parameter (0 to 1), used by ``mean_el`` strategy.
+                High lambda favors lower volatility (unexpected loss).
+            lgd: Loss Given Default.
+            use_forecast: If True, uses predicted PDs from self.d['pd_forecast'] or self.d['dd_forecast'].
+            min_weight: Minimum weight per asset (0 to 1). Forces diversification.
+                E.g. 0.02 guarantees each asset gets at least 2%.
+            max_weight: Maximum weight per asset (0 to 1). Prevents concentration.
+                E.g. 0.25 caps any single asset at 25%.
+            strategy: Optimization strategy. One of ``"mean_el"``, ``"cvar"``,
+                or ``"risk_parity"``.
+            cvar_alpha: Confidence level for CVaR (default 0.95). Only used when
+                ``strategy="cvar"``.
+            cutoff_date: If provided, only use returns data up to (and excluding)
+                this date for covariance estimation. Prevents look-ahead bias
+                during backtesting.
 
         Returns:
             Portfolio: Self with optimized weights in self.d['optimized_weights'].
@@ -922,9 +950,13 @@ class Portfolio:
             pds = current_pd_df["PD"].values
             log.info("Using historical PDs for optimization.")
 
-        # 2. Calculate Covariance matrix of asset returns proxy (stock log-returns)
+        # 2. Calculate returns matrix (daily log-returns)
         returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
         returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
+
+        # Fix look-ahead bias: use only data available at backtest date
+        if cutoff_date is not None:
+            returns_df = returns_df.loc[returns_df.index < cutoff_date]
 
         # Ensure we only use tickers present in both
         common_tickers = [t for t in tickers if t in returns_df.columns]
@@ -938,19 +970,54 @@ class Portfolio:
         else:
             pds = current_pd_df.set_index("ticker").loc[tickers]["PD"].values
 
-        cov_matrix = returns_df[tickers].cov().values * self.TRADING_DAYS_PER_YEAR  # Annualized
-        n = len(tickers)
+        if strategy == "cvar":
+            weights = self._solve_cvar(returns_df[tickers].values, pds, lgd, cvar_alpha, min_weight, max_weight)
+        elif strategy == "risk_parity":
+            weights = self._solve_risk_parity(returns_df[tickers].values, pds, lgd, min_weight, max_weight)
+        else:
+            weights = self._solve_mean_el(returns_df[tickers].values, pds, lgd, lambda_risk, min_weight, max_weight)
 
-        # 3. Objective function: lambda * sqrt(w' * Cov * w) + (1 - lambda) * sum(w_i * pd_i * lgd)
+        if weights is None:
+            return self
+
+        self.d["optimized_weights"] = pd.Series(weights, index=tickers, name="weight")
+        log.info("Portfolio optimization completed successfully (strategy=%s).", strategy)
+
+        return self
+
+    def _solve_mean_el(
+        self,
+        returns_matrix: np.ndarray,
+        pds: np.ndarray,
+        lgd: float,
+        lambda_risk: float,
+        min_weight: float,
+        max_weight: float,
+    ) -> np.ndarray:
+        """Solves the mean-EL optimization: lambda * vol + (1-lambda) * EL -> min.
+
+        Args:
+            returns_matrix: Daily log-returns, shape (S, N).
+            pds: Predicted PDs per asset, shape (N,).
+            lgd: Loss Given Default.
+            lambda_risk: Risk aversion coefficient.
+            min_weight: Minimum weight per asset.
+            max_weight: Maximum weight per asset.
+
+        Returns:
+            Optimal weight vector of shape (N,), or None on failure.
+        """
+        cov_matrix = np.cov(returns_matrix, rowvar=False) * self.TRADING_DAYS_PER_YEAR
+        n = len(pds)
+
         def objective(w):
             port_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
             expected_loss = np.sum(w * pds * lgd)
             return lambda_risk * port_vol + (1 - lambda_risk) * expected_loss
 
-        # 4. Constraints: sum(w) = 1, w_i >= 0
         constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
-        bounds = tuple((0, 1) for _ in range(n))
-        initial_guess = np.array([1.0 / n] * n)
+        bounds = tuple((min_weight, max_weight) for _ in range(n))
+        initial_guess = np.full(n, 1.0 / n)
 
         res = minimize(
             objective,
@@ -962,13 +1029,174 @@ class Portfolio:
         )
 
         if not res.success:
-            log.error("Portfolio optimization failed: %s", res.message)
-            return self
+            log.error("Mean-EL optimization failed: %s", res.message)
+            return None
+        return res.x
 
-        self.d["optimized_weights"] = pd.Series(res.x, index=tickers, name="weight")
-        log.info("Portfolio optimization completed successfully (Lambda=%.2f).", lambda_risk)
+    def _solve_cvar(
+        self,
+        returns_matrix: np.ndarray,
+        pds: np.ndarray,
+        lgd: float,
+        alpha: float,
+        min_weight: float,
+        max_weight: float,
+    ) -> np.ndarray:
+        """Solves the CVaR optimization via Rockafellar-Uryasev LP formulation.
 
-        return self
+        Minimizes CVaR_alpha of credit-adjusted portfolio losses.
+        Credit-adjusted return per scenario: r_i^(s) - PD_i * LGD.
+
+        LP variables: x = [w_1..w_N, zeta, u_1..u_S]
+        Objective:    min  zeta + 1/((1-alpha)*S) * sum(u_s)
+        Constraints:  u_s >= -(w^T r_adj^(s)) - zeta,  u_s >= 0
+                      sum(w) = 1,  w_min <= w_i <= w_max
+
+        Args:
+            returns_matrix: Daily log-returns, shape (S, N).
+            pds: Predicted PDs per asset, shape (N,).
+            lgd: Loss Given Default.
+            alpha: CVaR confidence level (e.g. 0.95).
+            min_weight: Minimum weight per asset.
+            max_weight: Maximum weight per asset.
+
+        Returns:
+            Optimal weight vector of shape (N,), or None on failure.
+        """
+        s_count, n = returns_matrix.shape
+
+        # Credit-adjusted returns: subtract daily-scaled expected loss
+        daily_el = (pds * lgd) / self.TRADING_DAYS_PER_YEAR
+        adjusted_returns = returns_matrix - daily_el.reshape(1, n)
+
+        coeff = 1.0 / ((1 - alpha) * s_count)
+        n_vars = n + 1 + s_count  # w, zeta, u
+
+        # Objective: c^T x -> min
+        c = np.zeros(n_vars)
+        c[n] = 1.0  # zeta
+        c[n + 1 :] = coeff  # u_s coefficients
+
+        # Inequality: A_ub @ x <= b_ub
+        # For each scenario s: -r_adj[s] @ w - zeta - u_s <= 0
+        A_ub = np.zeros((s_count, n_vars))
+        A_ub[:, :n] = -adjusted_returns  # -r_adj^(s) * w
+        A_ub[:, n] = -1.0  # -zeta
+        for s in range(s_count):
+            A_ub[s, n + 1 + s] = -1.0  # -u_s
+        b_ub = np.zeros(s_count)
+
+        # Equality: sum(w) = 1
+        A_eq = np.zeros((1, n_vars))
+        A_eq[0, :n] = 1.0
+        b_eq = np.array([1.0])
+
+        # Bounds
+        bounds_list = [(min_weight, max_weight)] * n
+        bounds_list.append((None, None))  # zeta unbounded
+        bounds_list.extend([(0.0, None)] * s_count)  # u_s >= 0
+
+        res = linprog(
+            c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds_list,
+            method="highs",
+        )
+
+        if not res.success:
+            log.error("CVaR optimization failed: %s", res.message)
+            return None
+
+        weights = res.x[:n]
+        cvar_value = res.fun
+        log.info(
+            "CVaR(%.0f%%) = %.6f (daily), VaR(zeta) = %.6f",
+            alpha * 100,
+            cvar_value,
+            res.x[n],
+        )
+        return weights
+
+    def _solve_risk_parity(
+        self,
+        returns_matrix: np.ndarray,
+        pds: np.ndarray,
+        lgd: float,
+        min_weight: float,
+        max_weight: float,
+    ) -> np.ndarray:
+        """Solves the Risk-Parity + Credit optimization.
+
+        Finds weights such that each asset contributes equal credit-adjusted
+        risk to the portfolio.  Uses the log-barrier formulation from
+        Maillard, Roncalli & Teiletche (2010) extended with PD-based credit
+        risk contributions.
+
+        Credit Risk Contribution of asset i:
+            CRC_i = w_i * (Sigma @ w)_i / sigma_p + w_i * PD_i * LGD
+
+        Objective:
+            min_w  sum_{i<j} (CRC_i - CRC_j)^2
+            s.t.   sum(w) = 1,  min_weight <= w_i <= max_weight
+
+        Args:
+            returns_matrix: Daily log-returns, shape (S, N).
+            pds: Predicted PDs per asset, shape (N,).
+            lgd: Loss Given Default.
+            min_weight: Minimum weight per asset.
+            max_weight: Maximum weight per asset.
+
+        Returns:
+            Optimal weight vector of shape (N,), or None on failure.
+        """
+        cov_matrix = np.cov(returns_matrix, rowvar=False) * self.TRADING_DAYS_PER_YEAR
+        n = len(pds)
+
+        def credit_risk_contributions(w: np.ndarray) -> np.ndarray:
+            """Computes credit-adjusted risk contribution per asset."""
+            sigma_w = cov_matrix @ w
+            port_vol = np.sqrt(w @ sigma_w)
+            # Market risk contribution
+            mrc = w * sigma_w / (port_vol + self.EPSILON)
+            # Credit risk contribution
+            crc = w * pds * lgd
+            return mrc + crc
+
+        def objective(w: np.ndarray) -> float:
+            """Sum of squared pairwise differences in risk contributions."""
+            rc = credit_risk_contributions(w)
+            diff_sum = 0.0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    diff_sum += (rc[i] - rc[j]) ** 2
+            return diff_sum
+
+        constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+        bounds = tuple((min_weight, max_weight) for _ in range(n))
+        initial_guess = np.full(n, 1.0 / n)
+
+        res = minimize(
+            objective,
+            initial_guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-12, "maxiter": 1000},
+        )
+
+        if not res.success:
+            log.error("Risk-Parity optimization failed: %s", res.message)
+            return None
+
+        log.info(
+            "Risk-Parity: objective=%.2e, max_rc_diff=%.4f",
+            res.fun,
+            np.max(credit_risk_contributions(res.x)) - np.min(credit_risk_contributions(res.x)),
+        )
+        return res.x
 
     def calc_portfolio_metrics(self, lgd: float = 0.4) -> "Portfolio":
         """
@@ -1130,6 +1358,236 @@ class Portfolio:
         plots.plot_macro_forecast(macro_df, forecast_dfs, tail=tail, figsize=figsize, verbose=verbose)
         return self
 
+    def analyze_macro_dd_significance(self, max_lag: int = 3, verbose: bool = True) -> "Portfolio":
+        """Analyzes the statistical significance of macro variables on DD.
+
+        Performs two analyses:
+        1. Pooled OLS regression: DD ~ inflation + interest_rate + unemployment + RUBUSD
+           with t-tests for individual coefficients and F-test for joint significance.
+        2. Granger causality tests: whether lagged macro variables improve DD prediction.
+
+        Args:
+            max_lag: Maximum number of lags for Granger causality tests.
+            verbose: If True, prints detailed results.
+
+        Returns:
+            Portfolio: Self with results in self.d['macro_significance'].
+        """
+        from statsmodels.tsa.stattools import grangercausalitytests
+
+        macro_cols = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
+
+        # --- Part 1: Pooled OLS regression (monthly panel) ---
+        panel = self.d["portfolio"][["date", "ticker", "DD"] + macro_cols].dropna().copy()
+        panel["month"] = panel["date"].dt.to_period("M")
+        monthly = (
+            panel.groupby(["ticker", "month"])
+            .agg(
+                DD=("DD", "mean"),
+                **{col: (col, "mean") for col in macro_cols},
+            )
+            .reset_index()
+        )
+
+        y = monthly["DD"]
+        X = sm.add_constant(monthly[macro_cols])
+        ols_model = sm.OLS(y, X).fit()
+
+        ols_summary = {
+            "r_squared": ols_model.rsquared,
+            "adj_r_squared": ols_model.rsquared_adj,
+            "f_statistic": ols_model.fvalue,
+            "f_pvalue": ols_model.f_pvalue,
+            "n_obs": int(ols_model.nobs),
+            "coefficients": {},
+        }
+        for var in ["const"] + macro_cols:
+            ols_summary["coefficients"][var] = {
+                "coef": ols_model.params[var],
+                "std_err": ols_model.bse[var],
+                "t_stat": ols_model.tvalues[var],
+                "p_value": ols_model.pvalues[var],
+                "significant": ols_model.pvalues[var] < 0.05,
+            }
+
+        # --- Part 2: Granger causality tests (aggregate monthly DD) ---
+        agg_monthly = (
+            panel.groupby("month")
+            .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in macro_cols})
+            .reset_index()
+            .sort_values("month")
+        )
+
+        granger_results = {}
+        for col in macro_cols:
+            series = agg_monthly[["DD", col]].dropna()
+            if len(series) < max_lag + 5:
+                granger_results[col] = {"error": "insufficient data"}
+                continue
+            test_result = grangercausalitytests(series.values, maxlag=max_lag, verbose=False)
+            best_lag = min(test_result, key=lambda x: test_result[x][0]["ssr_ftest"][1])
+            f_stat = test_result[best_lag][0]["ssr_ftest"][0]
+            p_val = test_result[best_lag][0]["ssr_ftest"][1]
+            granger_results[col] = {
+                "best_lag": best_lag,
+                "f_statistic": f_stat,
+                "p_value": p_val,
+                "significant": p_val < 0.05,
+            }
+
+        self.d["macro_significance"] = {
+            "ols": ols_summary,
+            "granger": granger_results,
+            "ols_model": ols_model,
+        }
+
+        if verbose:
+            log.info("=" * 80)
+            log.info("POOLED OLS REGRESSION: DD ~ macro variables")
+            log.info("=" * 80)
+            for line in str(ols_model.summary().tables[0]).split("\n"):
+                log.info(line)
+
+            coef_data = []
+            for var in ["const"] + macro_cols:
+                c = ols_summary["coefficients"][var]
+                sig = (
+                    "***"
+                    if c["p_value"] < 0.001
+                    else "**"
+                    if c["p_value"] < 0.01
+                    else "*"
+                    if c["p_value"] < 0.05
+                    else ""
+                )
+                coef_data.append(
+                    [var, f"{c['coef']:.4f}", f"{c['std_err']:.4f}", f"{c['t_stat']:.2f}", f"{c['p_value']:.4f}", sig]
+                )
+
+            coef_df = pd.DataFrame(coef_data, columns=["Variable", "Coef", "Std Err", "t-stat", "p-value", "Sig"])
+            log.info("\n" + coef_df.to_string(index=False))
+            log.info(f"R-squared: {ols_summary['r_squared']:.4f}, Adj R-squared: {ols_summary['adj_r_squared']:.4f}")
+            log.info(f"F-statistic: {ols_summary['f_statistic']:.2f}, p-value: {ols_summary['f_pvalue']:.2e}")
+            log.info(f"N observations: {ols_summary['n_obs']}")
+
+            log.info("=" * 80)
+            log.info(f"GRANGER CAUSALITY TESTS (max_lag={max_lag}): macro -> DD")
+            log.info("=" * 80)
+            granger_data = []
+            for col in macro_cols:
+                g = granger_results[col]
+                if "error" in g:
+                    granger_data.append([col, "-", "-", "-", g["error"]])
+                else:
+                    sig = (
+                        "***"
+                        if g["p_value"] < 0.001
+                        else "**"
+                        if g["p_value"] < 0.01
+                        else "*"
+                        if g["p_value"] < 0.05
+                        else ""
+                    )
+                    granger_data.append([col, g["best_lag"], f"{g['f_statistic']:.2f}", f"{g['p_value']:.4f}", sig])
+
+            granger_df = pd.DataFrame(granger_data, columns=["Variable", "Best Lag", "F-stat", "p-value", "Sig"])
+            log.info("\n" + granger_df.to_string(index=False))
+            log.info("Significance: *** p<0.001, ** p<0.01, * p<0.05")
+
+        log.info("Macro-DD significance analysis completed.")
+        return self
+
+    def compare_macro_models(
+        self,
+        n_months: int = 12,
+        models: List[str] = None,
+        target_col: str = "DD",
+        verbose: bool = False,
+    ) -> "Portfolio":
+        """Computes quantitative accuracy metrics (MAE, RMSE, MAPE) for macro models.
+
+        Runs walk-forward backtest: for each of the last ``n_months``, predicts
+        macro variables one step ahead and compares to actuals.  Results are
+        stored in ``self.d['macro_model_comparison']``.
+
+        Args:
+            n_months: Number of months in the backtest window.
+            models: List of model types to evaluate. Defaults to ['var', 'sarimax', 'prophet'].
+            target_col: Portfolio target metric ('DD' or 'PD').
+            verbose: Whether to display the comparison table.
+
+        Returns:
+            Portfolio: Self with ``self.d['macro_model_comparison']`` populated.
+        """
+        if models is None:
+            models = ["var", "sarimax", "prophet"]
+
+        macro_cols = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
+        all_cols = macro_cols + [target_col]
+
+        # Build monthly actuals
+        port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
+        macro_df = (
+            self.d["portfolio"][["date"] + macro_cols]
+            .drop_duplicates("date")
+            .merge(port_target, on="date", how="left")
+            .set_index("date")
+            .resample("ME")
+            .mean()
+            .dropna()
+        )
+        macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
+
+        rows = []
+        for m_type in models:
+            errors = {col: [] for col in all_cols}
+            for offset in range(n_months, 0, -1):
+                fc = self.predict_macro_factors(horizon=1, training_offset=offset, model_type=m_type)
+                target_date = fc.index[-1]
+
+                # Target col prediction
+                if target_col == "DD":
+                    self.predict_dd(horizon=1, training_offset=offset, model_type=m_type)
+                    pred_target = self.d["dd_forecast"]["predicted_dd"].mean()
+                else:
+                    self.predict_pd(horizon=1, training_offset=offset, model_type=m_type)
+                    pred_target = self.d["pd_forecast"]["predicted_pd"].mean()
+
+                if target_date not in macro_df.index:
+                    continue
+
+                actual = macro_df.loc[target_date]
+                for col in macro_cols:
+                    if col in fc.columns:
+                        errors[col].append(fc[col].values[0] - actual[col])
+                errors[target_col].append(pred_target - actual[target_col])
+
+            for col in all_cols:
+                errs = np.array(errors[col])
+                if len(errs) == 0:
+                    continue
+                actuals_abs = np.abs(macro_df[col].tail(n_months).values[: len(errs)])
+                mape_vals = np.abs(errs) / np.where(actuals_abs > 1e-8, actuals_abs, 1e-8)
+                rows.append(
+                    {
+                        "Model": m_type,
+                        "Variable": col,
+                        "MAE": round(np.mean(np.abs(errs)), 6),
+                        "RMSE": round(np.sqrt(np.mean(errs**2)), 6),
+                        "MAPE (%)": round(np.mean(mape_vals) * 100, 2),
+                    }
+                )
+
+        comparison_df = pd.DataFrame(rows)
+        self.d["macro_model_comparison"] = comparison_df
+
+        log.log_dataframe(comparison_df, title="Macro Model Comparison (Walk-Forward)")
+
+        if verbose:
+            plots.plot_macro_model_comparison(comparison_df, verbose=verbose)
+
+        return self
+
     def plot_pd_forecast(self, figsize: tuple = (12, 6), verbose: bool = False) -> "Portfolio":
         """
         Plots the comparison between predicted and reference PD for each ticker.
@@ -1174,9 +1632,16 @@ class Portfolio:
         model_type: str = "var",
         rebalance_threshold: float = 0.05,
         transaction_cost: float = 0.001,
+        min_weight: float = 0.0,
+        max_weight: float = 1.0,
+        strategy: Union[str, List[str]] = "mean_el",
+        cvar_alpha: float = 0.95,
     ) -> "Portfolio":
-        """
-        Backtests Active (threshold-rebalanced) vs Passive (equal weights) strategy.
+        """Backtests Active (threshold-rebalanced) vs Passive (equal weights) strategy.
+
+        Accepts one or several strategies. When a list is supplied, every
+        strategy is evaluated over the **same** walk-forward window and
+        a combined comparison table is logged at the end.
 
         Active strategy tracks actual weight drift after each period and only
         rebalances when any weight deviates from the optimized target by more
@@ -1193,21 +1658,29 @@ class Portfolio:
             TC(t) = c * sum_i |w_i^new(t) - w_i^actual(t)|
 
         Args:
-            n_months (int): Number of months for the backtest window.
-            lambda_risk (float): Risk aversion for active optimization.
-            lgd (float): Loss Given Default.
-            model_type (str): Macro model used for forecasts.
-            rebalance_threshold (float): Max allowed drift before rebalancing (0-1).
+            n_months: Number of months for the backtest window.
+            lambda_risk: Risk aversion for active optimization (mean_el strategy).
+            lgd: Loss Given Default.
+            model_type: Macro model used for forecasts.
+            rebalance_threshold: Max allowed drift before rebalancing (0-1).
                 E.g. 0.05 means rebalance when any weight drifts >5 pp.
-            transaction_cost (float): One-way proportional cost per unit of turnover.
+            transaction_cost: One-way proportional cost per unit of turnover.
                 E.g. 0.001 = 10 basis points round-trip.
+            min_weight: Minimum weight per asset (forces diversification).
+            max_weight: Maximum weight per asset (prevents concentration).
+            strategy: One strategy name or a list of strategy names.
+                Supported values: ``"mean_el"``, ``"cvar"``, ``"risk_parity"``.
+            cvar_alpha: CVaR confidence level (only used when ``strategy="cvar"``).
 
         Returns:
             Portfolio: Self with results stored in self.d['strategy_backtest'].
         """
+        strategies: List[str] = [strategy] if isinstance(strategy, str) else list(strategy)
+
         log.info(
             f"Starting strategy backtest for the last {n_months} months "
-            f"(threshold={rebalance_threshold:.1%}, tc={transaction_cost:.4f})..."
+            f"(strategies={strategies}, threshold={rebalance_threshold:.1%}, "
+            f"tc={transaction_cost:.4f})..."
         )
 
         # 1. Prepare monthly data
@@ -1223,9 +1696,8 @@ class Portfolio:
         monthly_returns = monthly_returns.loc[common_index]
         monthly_pds = monthly_pds.loc[common_index]
 
-        results = []
-
-        # 2. Historical Baseline (BEFORE backtest) -- both strategies equal-weight
+        # 2. Historical Baseline (BEFORE backtest) -- shared across strategies
+        hist_baseline: List[dict] = []
         hist_returns = monthly_returns.iloc[:-n_months]
         for date in hist_returns.index:
             available_tickers = monthly_returns.columns[monthly_returns.loc[date].notna()]
@@ -1237,7 +1709,7 @@ class Portfolio:
             ret_eq = (monthly_returns.loc[date, available_tickers] * w_eq).sum()
             el_eq = (monthly_pds.loc[date, available_tickers] * w_eq).sum() * lgd
 
-            results.append(
+            hist_baseline.append(
                 {
                     "Date": date,
                     "Active_Return": ret_eq,
@@ -1256,119 +1728,206 @@ class Portfolio:
             log.error(f"Insufficient history for {n_months} months backtest.")
             return self
 
-        # State: current actual weights for active strategy (None = not yet initialized)
-        w_active_actual: pd.Series = None
-        w_target: pd.Series = None
-        total_rebalances = 0
+        # Per-strategy state
+        strat_state: Dict[str, dict] = {}
+        for strat in strategies:
+            strat_state[strat] = {
+                "w_active_actual": None,
+                "w_target": None,
+                "total_rebalances": 0,
+                "weight_history": [],
+                "results": list(hist_baseline),
+            }
 
         for offset in range(n_months, 0, -1):
             target_date = monthly_returns.index[-offset]
             log.info(f"Backtesting month: {target_date.strftime('%Y-%m')}")
 
-            # --- Compute new TARGET weights from optimization ---
+            # Predict DD once per month (shared across strategies)
             self.predict_dd(horizon=1, training_offset=offset, model_type=model_type)
-            self.optimize_portfolio(lambda_risk=lambda_risk, lgd=lgd, use_forecast=True)
-            w_target = self.d["optimized_weights"]
 
-            available_tickers = w_target.index.intersection(monthly_returns.columns)
-            w_target = w_target.loc[available_tickers]
-            w_target = w_target / w_target.sum()
+            for strat in strategies:
+                st = strat_state[strat]
 
-            # --- STRATEGY 1: ACTIVE with Threshold Rebalancing ---
-            if w_active_actual is None:
-                # First period: initialize to target (full rebalance)
-                w_active_actual = w_target.copy()
-                turnover = w_target.abs().sum()  # Initial investment
-                rebalanced = True
-                total_rebalances += 1
-            else:
-                # Drift: update actual weights by realized returns
-                rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
+                # --- Compute new TARGET weights from optimization ---
+                # cutoff_date=target_date prevents look-ahead bias in covariance
+                self.optimize_portfolio(
+                    lambda_risk=lambda_risk,
+                    lgd=lgd,
+                    use_forecast=True,
+                    min_weight=min_weight,
+                    max_weight=max_weight,
+                    strategy=strat,
+                    cvar_alpha=cvar_alpha,
+                    cutoff_date=target_date,
+                )
+                w_target = self.d["optimized_weights"]
 
-                # Align to available tickers (handle new/removed tickers)
-                common = w_active_actual.index.intersection(available_tickers)
-                w_drifted = w_active_actual.reindex(available_tickers, fill_value=0.0)
-                w_drifted.loc[common] = w_active_actual.loc[common] * (1 + rets.loc[common])
-                total_val = w_drifted.sum()
-                w_drifted = w_drifted / total_val if total_val > 0 else w_target.copy()
+                available_tickers = w_target.index.intersection(monthly_returns.columns)
+                w_target = w_target.loc[available_tickers]
+                w_target = w_target / w_target.sum()
 
-                # Check threshold: rebalance only if max drift exceeds delta
-                max_drift = (w_drifted - w_target).abs().max()
+                w_active_actual = st["w_active_actual"]
 
-                if max_drift > rebalance_threshold:
-                    turnover = (w_target - w_drifted).abs().sum()
+                # --- ACTIVE with Threshold Rebalancing ---
+                if w_active_actual is None:
                     w_active_actual = w_target.copy()
+                    turnover = w_target.abs().sum()
                     rebalanced = True
-                    total_rebalances += 1
-                    log.info(f"  Rebalancing triggered (max drift={max_drift:.2%}, " f"turnover={turnover:.2%})")
+                    st["total_rebalances"] += 1
                 else:
-                    turnover = 0.0
-                    w_active_actual = w_drifted
-                    rebalanced = False
+                    rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
+                    common = w_active_actual.index.intersection(available_tickers)
+                    w_drifted = w_active_actual.reindex(available_tickers, fill_value=0.0)
+                    w_drifted.loc[common] = w_active_actual.loc[common] * (1 + rets.loc[common])
+                    total_val = w_drifted.sum()
+                    w_drifted = w_drifted / total_val if total_val > 0 else w_target.copy()
 
-            tc = transaction_cost * turnover
-            ret_active = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
-            el_active = np.sum(w_active_actual * monthly_pds.loc[target_date, available_tickers] * lgd)
+                    max_drift = (w_drifted - w_target).abs().max()
+                    if max_drift > rebalance_threshold:
+                        turnover = (w_target - w_drifted).abs().sum()
+                        w_active_actual = w_target.copy()
+                        rebalanced = True
+                        st["total_rebalances"] += 1
+                        log.info(
+                            f"  [{strat}] Rebalancing triggered "
+                            f"(max drift={max_drift:.2%}, turnover={turnover:.2%})"
+                        )
+                    else:
+                        turnover = 0.0
+                        w_active_actual = w_drifted
+                        rebalanced = False
 
-            # --- STRATEGY 2: PASSIVE (EQUAL WEIGHTS, no threshold needed) ---
-            n_tickers = len(available_tickers)
-            w_passive = pd.Series(1.0 / n_tickers, index=available_tickers)
+                st["w_active_actual"] = w_active_actual
+                st["w_target"] = w_target
 
-            ret_passive = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
-            el_passive = np.sum(w_passive * monthly_pds.loc[target_date, available_tickers] * lgd)
+                tc = transaction_cost * turnover
+                ret_active = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
+                el_active = np.sum(w_active_actual * monthly_pds.loc[target_date, available_tickers] * lgd)
 
-            results.append(
+                # --- PASSIVE (EQUAL WEIGHTS) ---
+                n_tickers = len(available_tickers)
+                w_passive = pd.Series(1.0 / n_tickers, index=available_tickers)
+                ret_passive = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
+                el_passive = np.sum(w_passive * monthly_pds.loc[target_date, available_tickers] * lgd)
+
+                # Record weight snapshot
+                weight_record = {"date": target_date, "rebalanced": rebalanced}
+                for ticker in available_tickers:
+                    weight_record[ticker] = w_active_actual.get(ticker, 0.0)
+                st["weight_history"].append(weight_record)
+
+                st["results"].append(
+                    {
+                        "Date": target_date,
+                        "Active_Return": ret_active,
+                        "Active_EL": el_active,
+                        "Passive_Return": ret_passive,
+                        "Passive_EL": el_passive,
+                        "Actual_PD": monthly_pds.loc[target_date].mean(),
+                        "Turnover": turnover,
+                        "TC": tc,
+                        "Rebalanced": rebalanced,
+                    }
+                )
+
+        # 4. Build per-strategy summaries
+        all_backtests: Dict[str, pd.DataFrame] = {}
+        all_weight_histories: Dict[str, pd.DataFrame] = {}
+        comparison_rows: List[dict] = []
+
+        for strat in strategies:
+            st = strat_state[strat]
+            backtest_df = pd.DataFrame(st["results"]).set_index("Date")
+            all_backtests[strat] = backtest_df
+
+            bt_only = backtest_df.tail(n_months)
+
+            comparison_rows.append(
                 {
-                    "Date": target_date,
-                    "Active_Return": ret_active,
-                    "Active_EL": el_active,
-                    "Passive_Return": ret_passive,
-                    "Passive_EL": el_passive,
-                    "Actual_PD": monthly_pds.loc[target_date].mean(),
-                    "Turnover": turnover,
-                    "TC": tc,
-                    "Rebalanced": rebalanced,
+                    "Strategy": strat,
+                    "Total Return (%)": round(((1 + bt_only["Active_Return"]).prod() - 1) * 100, 4),
+                    "Avg Realized EL (%)": round(bt_only["Active_EL"].mean() * 100, 6),
+                    "Realized Vol (%)": round(bt_only["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100, 4),
+                    "Total TC (%)": round(bt_only["TC"].sum() * 100, 4),
+                    "Rebalances": int(bt_only["Rebalanced"].sum()),
+                    "Avg Turnover (%)": round(bt_only["Turnover"].mean() * 100, 4),
                 }
             )
 
-        backtest_df = pd.DataFrame(results).set_index("Date")
+            # Weight history
+            wh_df = pd.DataFrame(st["weight_history"]).set_index("date")
+            rebal_flags = wh_df.pop("rebalanced")
+            wh_df = wh_df.fillna(0.0)
+            wh_df["rebalanced"] = rebal_flags
+            all_weight_histories[strat] = wh_df
 
-        # 4. Summary (only for backtest period)
-        bt_only = backtest_df.tail(n_months)
-        summary = {
+            log.info(
+                f"[{strat}] Backtest completed. "
+                f"Rebalances: {st['total_rebalances']}/{n_months} "
+                f"(threshold={rebalance_threshold:.1%})"
+            )
+
+        # Add passive baseline row (same for all strategies)
+        last_bt = all_backtests[strategies[-1]]
+        bt_passive = last_bt.tail(n_months)
+        comparison_rows.append(
+            {
+                "Strategy": "passive (equal)",
+                "Total Return (%)": round(((1 + bt_passive["Passive_Return"]).prod() - 1) * 100, 4),
+                "Avg Realized EL (%)": round(bt_passive["Passive_EL"].mean() * 100, 6),
+                "Realized Vol (%)": round(bt_passive["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100, 4),
+                "Total TC (%)": 0.0,
+                "Rebalances": 0,
+                "Avg Turnover (%)": 0.0,
+            }
+        )
+
+        multi_comparison = pd.DataFrame(comparison_rows).set_index("Strategy")
+
+        # 5. Log comparison table
+        log.log_dataframe(multi_comparison.reset_index(), title="Strategy Comparison")
+
+        # 6. Store results
+        self.d["all_backtests"] = all_backtests
+        self.d["all_weight_histories"] = all_weight_histories
+        self.d["multi_strategy_comparison"] = multi_comparison
+
+        # Backward-compatible keys: use the last strategy in the list
+        last_strat = strategies[-1]
+        self.d["strategy_backtest"] = all_backtests[last_strat]
+        self.d["weight_history"] = all_weight_histories[last_strat]
+
+        # Build backward-compatible two-row comparison (Active vs Passive)
+        last_bt_only = all_backtests[last_strat].tail(n_months)
+        summary_compat = {
             "Total Return (%)": [
-                ((1 + bt_only["Active_Return"]).prod() - 1) * 100,
-                ((1 + bt_only["Passive_Return"]).prod() - 1) * 100,
+                ((1 + last_bt_only["Active_Return"]).prod() - 1) * 100,
+                ((1 + last_bt_only["Passive_Return"]).prod() - 1) * 100,
             ],
             "Avg Realized EL (%)": [
-                bt_only["Active_EL"].mean() * 100,
-                bt_only["Passive_EL"].mean() * 100,
+                last_bt_only["Active_EL"].mean() * 100,
+                last_bt_only["Passive_EL"].mean() * 100,
             ],
             "Realized Volatility (%)": [
-                bt_only["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
-                bt_only["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+                last_bt_only["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+                last_bt_only["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
             ],
             "Total Transaction Cost (%)": [
-                bt_only["TC"].sum() * 100,
+                last_bt_only["TC"].sum() * 100,
                 0.0,
             ],
             "Rebalances": [
-                int(bt_only["Rebalanced"].sum()),
+                int(last_bt_only["Rebalanced"].sum()),
                 0,
             ],
             "Avg Turnover (%)": [
-                bt_only["Turnover"].mean() * 100,
+                last_bt_only["Turnover"].mean() * 100,
                 0.0,
             ],
         }
+        self.d["strategy_comparison"] = pd.DataFrame(summary_compat, index=["Active (Optimized)", "Passive (Equal)"])
 
-        self.d["strategy_backtest"] = backtest_df
-        self.d["strategy_comparison"] = pd.DataFrame(summary, index=["Active (Optimized)", "Passive (Equal)"])
-
-        log.info(
-            f"Strategy backtest completed. Rebalances: {total_rebalances}/{n_months} "
-            f"(threshold={rebalance_threshold:.1%})"
-        )
         return self
 
     def plot_strategy_backtest(self, tail: int = 12, verbose: bool = False):
@@ -1380,8 +1939,61 @@ class Portfolio:
             return self
 
         plots.plot_strategy_comparison(
-            self.d["strategy_backtest"], self.d["strategy_comparison"], tail=tail, verbose=verbose
+            self.d["strategy_backtest"],
+            self.d["strategy_comparison"],
+            tail=tail,
+            verbose=verbose,
+            all_backtests=self.d.get("all_backtests"),
         )
+        return self
+
+    def log_weight_history(self) -> "Portfolio":
+        """Logs the portfolio weight history as a formatted table via the logger.
+
+        Shows how active strategy weights evolved at each backtest period,
+        marking rebalanced periods with [R].
+
+        Returns:
+            Portfolio: Self for chaining.
+        """
+        if "weight_history" not in self.d or self.d["weight_history"] is None:
+            log.error("No weight history found. Run backtest_portfolio_strategies first.")
+            return self
+
+        wh = self.d["weight_history"].copy()
+        rebalanced = wh.pop("rebalanced")
+
+        # Build a display DataFrame with date, rebalanced flag, and ticker weights
+        ticker_cols = [c for c in wh.columns]
+        display_rows = []
+        for date, row in wh.iterrows():
+            record = {
+                "Date": date.strftime("%Y-%m"),
+                "Reb": "[R]" if rebalanced.loc[date] else "",
+            }
+            for col in ticker_cols:
+                record[col] = f"{row[col]:.1%}"
+            display_rows.append(record)
+
+        display_df = pd.DataFrame(display_rows)
+        log.log_dataframe(display_df, title="Portfolio Weight History (Active Strategy)")
+        return self
+
+    def plot_weight_history(self, figsize: tuple = (14, 7), verbose: bool = False) -> "Portfolio":
+        """Plots the evolution of portfolio weights over time during backtesting.
+
+        Args:
+            figsize: Figure size.
+            verbose: Whether to display the plot interactively.
+
+        Returns:
+            Portfolio: Self for chaining.
+        """
+        if "weight_history" not in self.d or self.d["weight_history"] is None:
+            log.error("No weight history found. Run backtest_portfolio_strategies first.")
+            return self
+
+        plots.plot_weight_history(self.d["weight_history"], figsize=figsize, verbose=verbose)
         return self
 
     def plot_ticker_dashboards(self, tickers: list, figsize_row: tuple = (18, 5), verbose: bool = False) -> "Portfolio":
