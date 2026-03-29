@@ -10,12 +10,14 @@ mutate ``self.d`` in place, returning ``self`` for method chaining.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Union, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, linprog
 
+import utils.config as cfg
 from utils.logger import Logger
 
 if TYPE_CHECKING:
@@ -23,9 +25,21 @@ if TYPE_CHECKING:
 
 log = Logger(__name__)
 
-_TRADING_DAYS: int = 252
-_MONTHS_PER_YEAR: int = 12
-_EPSILON: float = 1e-6
+# Rounding specification for Loan Allocations display (column -> decimal places).
+_ALLOC_ROUNDING: dict = {
+    "requested": 0,
+    "approved": 2,
+    "approval_rate": 2,
+    "weight": 2,
+    "rate": 2,
+    "term": 2,
+    "pd": 2,
+    "pd_cum": 2,
+    "lgd": 2,
+    "risk_adj_return": 2,
+    "expected_income": 0,
+    "expected_loss": 0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +68,7 @@ def _solve_mean_el_fn(
     Returns:
         Optimal weight vector of shape (N,), or None on failure.
     """
-    cov_matrix = np.cov(returns_matrix, rowvar=False) * _TRADING_DAYS
+    cov_matrix = np.cov(returns_matrix, rowvar=False) * cfg.TRADING_DAYS_PER_YEAR
     n = len(pds)
 
     def objective(w):
@@ -110,7 +124,7 @@ def _solve_cvar_fn(
         Optimal weight vector of shape (N,), or None on failure.
     """
     s_count, n = returns_matrix.shape
-    daily_el = (pds * lgd) / _TRADING_DAYS
+    daily_el = (pds * lgd) / cfg.TRADING_DAYS_PER_YEAR
     adjusted_returns = returns_matrix - daily_el.reshape(1, n)
 
     coeff = 1.0 / ((1 - alpha) * s_count)
@@ -167,13 +181,13 @@ def _solve_risk_parity_fn(
     Returns:
         Optimal weight vector of shape (N,), or None on failure.
     """
-    cov_matrix = np.cov(returns_matrix, rowvar=False) * _TRADING_DAYS
+    cov_matrix = np.cov(returns_matrix, rowvar=False) * cfg.TRADING_DAYS_PER_YEAR
     n = len(pds)
 
     def credit_risk_contributions(w: np.ndarray) -> np.ndarray:
         sigma_w = cov_matrix @ w
         port_vol = np.sqrt(w @ sigma_w)
-        mrc = w * sigma_w / (port_vol + _EPSILON)
+        mrc = w * sigma_w / (port_vol + cfg.EPSILON)
         crc = w * pds * lgd
         return mrc + crc
 
@@ -247,19 +261,19 @@ def optimize_portfolio_fn(
         current_pd_series = self.d["dd_forecast"]["predicted_pd"]
         tickers = current_pd_series.index.tolist()
         pds = current_pd_series.values
-        log.info("Using predicted PDs (from DD model) for optimization.")
+        log.debug("Using predicted PDs (from DD model) for optimization.")
     elif use_forecast and "pd_forecast" in self.d:
         current_pd_series = self.d["pd_forecast"]["predicted_pd"]
         tickers = current_pd_series.index.tolist()
         pds = current_pd_series.values
-        log.info("Using predicted PDs for optimization.")
+        log.debug("Using predicted PDs for optimization.")
     else:
         portfolio_df = self.d["portfolio"]
         latest_date = portfolio_df["date"].max()
         current_pd_df = portfolio_df[portfolio_df["date"] == latest_date][["ticker", "PD"]]
         tickers = current_pd_df["ticker"].tolist()
         pds = current_pd_df["PD"].values
-        log.info("Using historical PDs for optimization.")
+        log.debug("Using historical PDs for optimization.")
 
     returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
     returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
@@ -289,7 +303,7 @@ def optimize_portfolio_fn(
         return self
 
     self.d["optimized_weights"] = pd.Series(weights, index=tickers, name="weight")
-    log.info("Portfolio optimization completed successfully (strategy=%s).", strategy)
+    log.debug("Portfolio optimization completed successfully (strategy=%s).", strategy)
     return self
 
 
@@ -327,7 +341,7 @@ def calc_portfolio_metrics_fn(self: "Portfolio", lgd: float = 0.4) -> "Portfolio
 
     returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
     returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
-    cov_matrix = returns_df[tickers].cov().values * _TRADING_DAYS
+    cov_matrix = returns_df[tickers].cov().values * cfg.TRADING_DAYS_PER_YEAR
     portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
 
     hhi = np.sum(weights**2)
@@ -385,12 +399,6 @@ def backtest_portfolio_strategies_fn(
     """
     strategies: List[str] = [strategy] if isinstance(strategy, str) else list(strategy)
 
-    log.info(
-        f"Starting strategy backtest for the last {n_months} months "
-        f"(strategies={strategies}, threshold={rebalance_threshold:.1%}, "
-        f"tc={transaction_cost:.4f})..."
-    )
-
     prices_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
     monthly_prices = prices_pivot.resample("ME").last()
     monthly_returns = monthly_prices.pct_change().dropna()
@@ -442,7 +450,6 @@ def backtest_portfolio_strategies_fn(
 
     for offset in range(n_months, 0, -1):
         target_date = monthly_returns.index[-offset]
-        log.info(f"Backtesting month: {target_date.strftime('%Y-%m')}")
 
         self.predict_dd(horizon=1, training_offset=offset, model_type=model_type)
 
@@ -540,7 +547,7 @@ def backtest_portfolio_strategies_fn(
                 "Strategy": strat,
                 "Total Return (%)": round(((1 + bt_only["Active_Return"]).prod() - 1) * 100, 4),
                 "Avg Realized EL (%)": round(bt_only["Active_EL"].mean() * 100, 6),
-                "Realized Vol (%)": round(bt_only["Active_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100, 4),
+                "Realized Vol (%)": round(bt_only["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
                 "Total TC (%)": round(bt_only["TC"].sum() * 100, 4),
                 "Rebalances": int(bt_only["Rebalanced"].sum()),
                 "Avg Turnover (%)": round(bt_only["Turnover"].mean() * 100, 4),
@@ -553,12 +560,6 @@ def backtest_portfolio_strategies_fn(
         wh_df["rebalanced"] = rebal_flags
         all_weight_histories[strat] = wh_df
 
-        log.info(
-            f"[{strat}] Backtest completed. "
-            f"Rebalances: {st['total_rebalances']}/{n_months} "
-            f"(threshold={rebalance_threshold:.1%})"
-        )
-
     last_bt = all_backtests[strategies[-1]]
     bt_passive = last_bt.tail(n_months)
     comparison_rows.append(
@@ -566,7 +567,7 @@ def backtest_portfolio_strategies_fn(
             "Strategy": "passive (equal)",
             "Total Return (%)": round(((1 + bt_passive["Passive_Return"]).prod() - 1) * 100, 4),
             "Avg Realized EL (%)": round(bt_passive["Passive_EL"].mean() * 100, 6),
-            "Realized Vol (%)": round(bt_passive["Passive_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100, 4),
+            "Realized Vol (%)": round(bt_passive["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
             "Total TC (%)": 0.0,
             "Rebalances": 0,
             "Avg Turnover (%)": 0.0,
@@ -595,8 +596,8 @@ def backtest_portfolio_strategies_fn(
             last_bt_only["Passive_EL"].mean() * 100,
         ],
         "Realized Volatility (%)": [
-            last_bt_only["Active_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100,
-            last_bt_only["Passive_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100,
+            last_bt_only["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100,
+            last_bt_only["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100,
         ],
         "Total Transaction Cost (%)": [last_bt_only["TC"].sum() * 100, 0.0],
         "Rebalances": [int(last_bt_only["Rebalanced"].sum()), 0],
@@ -657,10 +658,10 @@ def optimize_portfolio_with_amounts_fn(
 
     if "dd_forecast" in self.d:
         pds = self.d["dd_forecast"]["predicted_pd"].loc[tickers].values.astype(float)
-        log.info("Using predicted PDs (from DD model) for amount-based optimization.")
+        log.debug("Using predicted PDs (from DD model) for amount-based optimization.")
     elif "pd_forecast" in self.d:
         pds = self.d["pd_forecast"]["predicted_pd"].loc[tickers].values.astype(float)
-        log.info("Using predicted PDs for amount-based optimization.")
+        log.debug("Using predicted PDs for amount-based optimization.")
     else:
         latest_date = self.d["portfolio"]["date"].max()
         pds = (
@@ -669,7 +670,7 @@ def optimize_portfolio_with_amounts_fn(
             .loc[tickers]["PD"]
             .values.astype(float)
         )
-        log.info("Using historical PDs for amount-based optimization.")
+        log.debug("Using historical PDs for amount-based optimization.")
 
     pd_cum = 1.0 - (1.0 - pds) ** (terms / 12.0)
     risk_adj_return = rates * (1.0 - pd_cum) - pd_cum * lgds * 12.0 / terms
@@ -679,10 +680,10 @@ def optimize_portfolio_with_amounts_fn(
     if cutoff_date is not None:
         returns_df = returns_df.loc[returns_df.index < cutoff_date]
     returns_matrix = returns_df[tickers].values
-    cov_matrix = returns_df[tickers].cov().values * _TRADING_DAYS
+    cov_matrix = returns_df[tickers].cov().values * cfg.TRADING_DAYS_PER_YEAR
 
     el_annual = pd_cum * lgds * 12.0 / terms
-    daily_el = (pd_cum * lgds) / _TRADING_DAYS
+    daily_el = (pd_cum * lgds) / cfg.TRADING_DAYS_PER_YEAR
     adjusted_returns = returns_matrix - daily_el.reshape(1, n)
 
     # Decision variable z = x/budget: rescales gradients from O(rate/budget)~5e-12
@@ -690,7 +691,7 @@ def optimize_portfolio_with_amounts_fn(
     if strategy == "mean_el":
 
         def objective(z: np.ndarray) -> float:
-            total = z.sum() + _EPSILON
+            total = z.sum() + cfg.EPSILON
             w = z / total
             income = np.sum(z * risk_adj_return)
             port_vol = np.sqrt(w @ cov_matrix @ w)
@@ -700,27 +701,27 @@ def optimize_portfolio_with_amounts_fn(
     elif strategy == "cvar":
 
         def objective(z: np.ndarray) -> float:
-            total = z.sum() + _EPSILON
+            total = z.sum() + cfg.EPSILON
             w = z / total
             income = np.sum(z * risk_adj_return)
             port_losses = -(adjusted_returns @ w)
             sorted_losses = np.sort(port_losses)[::-1]
             cutoff = max(int(np.ceil((1 - cvar_alpha) * len(sorted_losses))), 1)
-            cvar_val = np.mean(sorted_losses[:cutoff]) * np.sqrt(_TRADING_DAYS)
+            cvar_val = np.mean(sorted_losses[:cutoff]) * np.sqrt(cfg.TRADING_DAYS_PER_YEAR)
             el = np.sum(w * el_annual)
             return -lambda_return * income + lambda_vol * cvar_val + lambda_el * el
 
     elif strategy == "risk_parity":
 
         def objective(z: np.ndarray) -> float:
-            total = z.sum() + _EPSILON
+            total = z.sum() + cfg.EPSILON
             w = z / total
             income = np.sum(z * risk_adj_return)
             sigma_w = cov_matrix @ w
-            port_vol = np.sqrt(w @ sigma_w + _EPSILON)
-            mrc = w * sigma_w / (port_vol + _EPSILON)
+            port_vol = np.sqrt(w @ sigma_w + cfg.EPSILON)
+            mrc = w * sigma_w / (port_vol + cfg.EPSILON)
             crc = mrc + w * el_annual
-            total_crc = crc.sum() + _EPSILON
+            total_crc = crc.sum() + cfg.EPSILON
             crc_norm = crc / total_crc
             target = 1.0 / n
             diff_sum = float(np.sum((crc_norm - target) ** 2))
@@ -730,7 +731,7 @@ def optimize_portfolio_with_amounts_fn(
         log.error("Unknown strategy '%s'. Use 'mean_el', 'cvar', or 'risk_parity'.", strategy)
         return self
 
-    log.info("Amount-based optimization: strategy=%s", strategy)
+    log.debug("Amount-based optimization: strategy=%s", strategy)
 
     constraints = [{"type": "ineq", "fun": lambda z: 1.0 - np.sum(z)}]
     if sector_map is not None:
@@ -766,8 +767,8 @@ def optimize_portfolio_with_amounts_fn(
             "ticker": tickers,
             "requested": amounts,
             "approved": approved,
-            "approval_rate": approved / np.where(amounts > 0, amounts, _EPSILON),
-            "weight": approved / (total_approved + _EPSILON),
+            "approval_rate": approved / np.where(amounts > 0, amounts, cfg.EPSILON),
+            "weight": approved / (total_approved + cfg.EPSILON),
             "rate": rates,
             "term": terms,
             "pd": pds,
@@ -779,7 +780,7 @@ def optimize_portfolio_with_amounts_fn(
         }
     )
 
-    weights = approved / (total_approved + _EPSILON)
+    weights = approved / (total_approved + cfg.EPSILON)
     self.d["optimized_weights"] = pd.Series(weights, index=tickers, name="weight")
 
     total_income = np.sum(approved * risk_adj_return)
@@ -793,18 +794,22 @@ def optimize_portfolio_with_amounts_fn(
         "Expected Income": total_income,
         "Expected Loss": total_el,
         "Net Expected Income": total_income - total_el,
-        "RAROC (%)": (total_income / (total_approved + _EPSILON)) * 100,
+        "RAROC (%)": (total_income / (total_approved + cfg.EPSILON)) * 100,
         "Portfolio Volatility (%)": port_vol * 100,
         "Applications": n,
         "Fully Approved": int(np.sum(np.isclose(approved, amounts, rtol=0.01))),
         "Partially Approved": int(np.sum((approved > 0) & (~np.isclose(approved, amounts, rtol=0.01)))),
-        "Rejected": int(np.sum(approved < _EPSILON)),
+        "Rejected": int(np.sum(approved < cfg.EPSILON)),
     }
     self.d["loan_metrics"] = pd.DataFrame(list(metrics.items()), columns=["Metric", "Value"])
 
-    log.log_dataframe(self.d["loan_allocations"], title="Loan Allocations")
-    log.log_dataframe(self.d["loan_metrics"], title="Loan Portfolio Metrics")
-    log.info("Amount-based portfolio optimization completed successfully.")
+    alloc_display = self.d["loan_allocations"].copy()
+    for _col, _dec in _ALLOC_ROUNDING.items():
+        if _col in alloc_display.columns:
+            alloc_display[_col] = alloc_display[_col].round(_dec)
+    log.log_dataframe(alloc_display, title="Loan Allocations", level=logging.DEBUG)
+    log.log_dataframe(self.d["loan_metrics"], title="Loan Portfolio Metrics", level=logging.DEBUG)
+    log.debug("Amount-based portfolio optimization completed successfully.")
     return self
 
 
@@ -939,7 +944,7 @@ def backtest_portfolio_with_amounts_fn(
 
         alloc = self.d["loan_allocations"].set_index("ticker")
         w_target = alloc["weight"].reindex(available_tickers, fill_value=0.0)
-        w_target = w_target / (w_target.sum() + _EPSILON)
+        w_target = w_target / (w_target.sum() + cfg.EPSILON)
 
         if w_active_actual is None:
             w_active_actual = w_target.copy()
@@ -971,7 +976,7 @@ def backtest_portfolio_with_amounts_fn(
         active_credit_income = np.sum(
             w_active_actual.reindex(active_tickers_month, fill_value=0)
             * rates.reindex(active_tickers_month, fill_value=0)
-            / _MONTHS_PER_YEAR
+            / cfg.MONTHS_PER_YEAR
         )
 
         w_passive = pd.Series(0.0, index=available_tickers)
@@ -981,7 +986,7 @@ def backtest_portfolio_with_amounts_fn(
         passive_credit_income = np.sum(
             w_passive.reindex(active_tickers_month, fill_value=0)
             * rates.reindex(active_tickers_month, fill_value=0)
-            / _MONTHS_PER_YEAR
+            / cfg.MONTHS_PER_YEAR
         )
 
         weight_record = {"date": target_date, "rebalanced": rebalanced}
@@ -1030,8 +1035,8 @@ def backtest_portfolio_with_amounts_fn(
                 backtest_df["Passive_Net"].mean() * 100,
             ],
             "Realized Vol (%)": [
-                backtest_df["Active_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100,
-                backtest_df["Passive_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100,
+                backtest_df["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100,
+                backtest_df["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100,
             ],
             "Total TC (%)": [backtest_df["TC"].sum() * 100, 0.0],
             "Rebalances": [total_rebalances, 0],
@@ -1120,7 +1125,15 @@ def compare_amount_strategies_fn(
         bt = self.d["amount_backtest"].copy()
         all_backtests[strat] = bt
 
-        net_vol = bt["Active_Net"].std() * np.sqrt(_MONTHS_PER_YEAR)
+        alloc = self.d.get("loan_allocations")
+        if alloc is not None:
+            alloc_display = alloc.copy()
+            for _col, _dec in _ALLOC_ROUNDING.items():
+                if _col in alloc_display.columns:
+                    alloc_display[_col] = alloc_display[_col].round(_dec)
+            log.log_dataframe(alloc_display, title=f"[{strat}] Loan Allocations (last period)")
+
+        net_vol = bt["Active_Net"].std() * np.sqrt(cfg.MONTHS_PER_YEAR)
         comparison_rows.append(
             {
                 "Strategy": strat,
@@ -1128,15 +1141,15 @@ def compare_amount_strategies_fn(
                 "Avg Credit Income (%)": round(bt["Active_Credit_Income"].mean() * 100, 4),
                 "Avg Realized EL (%)": round(bt["Active_EL"].mean() * 100, 6),
                 "Avg Net Income (%)": round(bt["Active_Net"].mean() * 100, 4),
-                "Realized Vol (%)": round(bt["Active_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100, 4),
+                "Realized Vol (%)": round(bt["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
                 "Total TC (%)": round(bt["TC"].sum() * 100, 4),
                 "Rebalances": int(bt["Rebalanced"].sum()),
-                "RAROC (%)": round(bt["Active_Net"].mean() / (net_vol + _EPSILON) * 100, 4),
+                "RAROC (%)": round(bt["Active_Net"].mean() / (net_vol + cfg.EPSILON) * 100, 4),
             }
         )
 
     last_bt = all_backtests[strategies[-1]]
-    passive_net_vol = last_bt["Passive_Net"].std() * np.sqrt(_MONTHS_PER_YEAR)
+    passive_net_vol = last_bt["Passive_Net"].std() * np.sqrt(cfg.MONTHS_PER_YEAR)
     comparison_rows.append(
         {
             "Strategy": "passive (equal)",
@@ -1144,10 +1157,10 @@ def compare_amount_strategies_fn(
             "Avg Credit Income (%)": round(last_bt["Passive_Credit_Income"].mean() * 100, 4),
             "Avg Realized EL (%)": round(last_bt["Passive_EL"].mean() * 100, 6),
             "Avg Net Income (%)": round(last_bt["Passive_Net"].mean() * 100, 4),
-            "Realized Vol (%)": round(last_bt["Passive_Return"].std() * np.sqrt(_MONTHS_PER_YEAR) * 100, 4),
+            "Realized Vol (%)": round(last_bt["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
             "Total TC (%)": 0.0,
             "Rebalances": 0,
-            "RAROC (%)": round(last_bt["Passive_Net"].mean() / (passive_net_vol + _EPSILON) * 100, 4),
+            "RAROC (%)": round(last_bt["Passive_Net"].mean() / (passive_net_vol + cfg.EPSILON) * 100, 4),
         }
     )
 

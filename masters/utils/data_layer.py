@@ -25,6 +25,7 @@ from utils.load_data import (
     load_stock_data,
     update_pickle_object,
 )
+import utils.config as cfg
 from utils.logger import Logger
 
 if TYPE_CHECKING:
@@ -43,7 +44,7 @@ def load_stock_data_fn(
     tickers_list: list[str] = None,
     use_backup_data: bool = True,
     update_backup: bool = False,
-    backup_path: str = "data/backup/stocks.pkl",
+    backup_path: str = cfg.BACKUP_STOCKS_PATH,
 ) -> "Portfolio":
     """Loads stock data for the given tickers.
 
@@ -129,7 +130,7 @@ def load_multipliers_fn(
     tickers_list: list[str] = None,
     use_backup: bool = True,
     update_backup: bool = False,
-    backup_path: str = "data/backup/multipliers.pkl",
+    backup_path: str = cfg.BACKUP_MULTIPLIERS_PATH,
 ) -> "Portfolio":
     """Loads multipliers data for the given tickers.
 
@@ -245,9 +246,9 @@ def load_macro_data_fn(
     update_inflation: bool = False,
     update_rub_usd: bool = False,
     update_unemployment: bool = False,
-    inflation_path: str = "data/macro/inflation.xlsx",
-    rub_usd_path: str = "data/macro/rubusd.csv",
-    unemployment_path: str = "data/macro/unemployment.xlsx",
+    inflation_path: str = cfg.MACRO_INFLATION_PATH,
+    rub_usd_path: str = cfg.MACRO_RUBUSD_PATH,
+    unemployment_path: str = cfg.MACRO_UNEMPLOYMENT_PATH,
 ) -> "Portfolio":
     """Adds macroeconomic data to the portfolio.
 
@@ -368,7 +369,7 @@ def create_portfolio_fn(self: "Portfolio") -> "Portfolio":
                 self.d["portfolio"][col] = self.d["portfolio"][col].replace(0, np.nan)
 
             if "млрд руб" in col:
-                self.d["portfolio"][col] *= self.BILLION
+                self.d["portfolio"][col] *= cfg.BILLION
 
     self.d["portfolio"]["debt"] = np.select(
         [
@@ -442,12 +443,12 @@ def add_dynamic_features_fn(self: "Portfolio") -> "Portfolio":
     df["log_return"] = df.groupby("ticker")["close"].transform(lambda x: np.log(x / x.shift(1)))
 
     df["volatility"] = df.groupby("ticker")["log_return"].transform(
-        lambda x: x.ewm(span=self.ROLLING_VOL_WINDOW, min_periods=self.TRADING_DAYS_PER_MONTH).std()
-    ) * np.sqrt(self.TRADING_DAYS_PER_YEAR)
+        lambda x: x.ewm(span=cfg.ROLLING_VOL_WINDOW, min_periods=cfg.TRADING_DAYS_PER_MONTH).std()
+    ) * np.sqrt(cfg.TRADING_DAYS_PER_YEAR)
 
     df["volatility"] = df.groupby("ticker")["volatility"].transform(lambda x: x.bfill())
     global_avg_vol = df["volatility"].mean()
-    df["volatility"] = df["volatility"].fillna(global_avg_vol).fillna(self.DEFAULT_VOLATILITY)
+    df["volatility"] = df["volatility"].fillna(global_avg_vol).fillna(cfg.DEFAULT_VOLATILITY)
 
     df = df.drop(columns=["log_return"])
     self.d["portfolio"] = df
@@ -477,7 +478,7 @@ def _solve_merton_vectorized_fn(self: "Portfolio", T: float = 1) -> "Portfolio":
 
     def equations(vars, E_i, D_i, r_i, sigma_E_i, T_i):
         V, sigma_V = vars
-        d1 = np.log(V / D_i if D_i != 0 else self.EPSILON) + (r_i + 0.5 * sigma_V**2) * T_i
+        d1 = np.log(V / D_i if D_i != 0 else cfg.EPSILON) + (r_i + 0.5 * sigma_V**2) * T_i
         d1 /= sigma_V * np.sqrt(T_i)
         N_d1 = norm.cdf(d1)
         eq1 = V * N_d1 - D_i * np.exp(-r_i * T_i) * norm.cdf(d1 - sigma_V * np.sqrt(T_i)) - E_i
@@ -497,7 +498,7 @@ def _solve_merton_vectorized_fn(self: "Portfolio", T: float = 1) -> "Portfolio":
         ]
     )
 
-    self.d["portfolio"]["V"] = np.where(results[:, 0] <= 0, self.EPSILON, results[:, 0])
+    self.d["portfolio"]["V"] = np.where(results[:, 0] <= 0, cfg.EPSILON, results[:, 0])
     self.d["portfolio"]["sigma_V"] = results[:, 1]
     log.info("Capital cost and capital volatility calculated.")
     return self
@@ -518,7 +519,7 @@ def _merton_pd_fn(self: "Portfolio", T: float = 1) -> "Portfolio":
     sigma_V = self.d["portfolio"]["sigma_V"]
 
     d2 = (
-        np.log(V / np.where(D != 0, D, self.EPSILON)) + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
+        np.log(V / np.where(D != 0, D, cfg.EPSILON)) + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
     ) / (sigma_V * np.sqrt(T))
     self.d["portfolio"]["PD"] = norm.cdf(-d2)
     self.d["portfolio"]["DD"] = d2

@@ -22,14 +22,13 @@ from statsmodels.tsa.stattools import adfuller
 from prophet import Prophet
 
 import utils.plots as plots
+import utils.config as cfg
 from utils.logger import Logger
 
 if TYPE_CHECKING:
     from utils.portfolio import Portfolio
 
 log = Logger(__name__)
-
-_MACRO_COLS = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ def predict_macro_factors_fn(
         horizon = abs(horizon)
 
     macro_df = (
-        self.d["portfolio"][["date"] + _MACRO_COLS]
+        self.d["portfolio"][["date"] + cfg.MACRO_COLS]
         .drop_duplicates("date")
         .set_index("date")
         .resample("ME")
@@ -376,7 +375,7 @@ def plot_macro_forecast_fn(
 
     port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
     macro_df = (
-        self.d["portfolio"][["date"] + _MACRO_COLS]
+        self.d["portfolio"][["date"] + cfg.MACRO_COLS]
         .drop_duplicates("date")
         .merge(port_target, on="date", how="left")
         .set_index("date")
@@ -442,16 +441,16 @@ def analyze_macro_dd_significance_fn(
     """
     from statsmodels.tsa.stattools import grangercausalitytests
 
-    panel = self.d["portfolio"][["date", "ticker", "DD"] + _MACRO_COLS].dropna().copy()
+    panel = self.d["portfolio"][["date", "ticker", "DD"] + cfg.MACRO_COLS].dropna().copy()
     panel["month"] = panel["date"].dt.to_period("M")
     monthly = (
         panel.groupby(["ticker", "month"])
-        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in _MACRO_COLS})
+        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in cfg.MACRO_COLS})
         .reset_index()
     )
 
     y = monthly["DD"]
-    X = sm.add_constant(monthly[_MACRO_COLS])
+    X = sm.add_constant(monthly[cfg.MACRO_COLS])
     ols_model = sm.OLS(y, X).fit()
 
     ols_summary = {
@@ -462,7 +461,7 @@ def analyze_macro_dd_significance_fn(
         "n_obs": int(ols_model.nobs),
         "coefficients": {},
     }
-    for var in ["const"] + _MACRO_COLS:
+    for var in ["const"] + cfg.MACRO_COLS:
         ols_summary["coefficients"][var] = {
             "coef": ols_model.params[var],
             "std_err": ols_model.bse[var],
@@ -473,13 +472,13 @@ def analyze_macro_dd_significance_fn(
 
     agg_monthly = (
         panel.groupby("month")
-        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in _MACRO_COLS})
+        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in cfg.MACRO_COLS})
         .reset_index()
         .sort_values("month")
     )
 
     granger_results = {}
-    for col in _MACRO_COLS:
+    for col in cfg.MACRO_COLS:
         series = agg_monthly[["DD", col]].dropna()
         if len(series) < max_lag + 5:
             granger_results[col] = {"error": "insufficient data"}
@@ -509,7 +508,7 @@ def analyze_macro_dd_significance_fn(
             log.info(line)
 
         coef_data = []
-        for var in ["const"] + _MACRO_COLS:
+        for var in ["const"] + cfg.MACRO_COLS:
             c = ols_summary["coefficients"][var]
             sig = "***" if c["p_value"] < 0.001 else "**" if c["p_value"] < 0.01 else "*" if c["p_value"] < 0.05 else ""
             coef_data.append(
@@ -525,7 +524,7 @@ def analyze_macro_dd_significance_fn(
         log.info(f"GRANGER CAUSALITY TESTS (max_lag={max_lag}): macro -> DD")
         log.info("=" * 80)
         granger_data = []
-        for col in _MACRO_COLS:
+        for col in cfg.MACRO_COLS:
             g = granger_results[col]
             if "error" in g:
                 granger_data.append([col, "-", "-", "-", g["error"]])
@@ -575,11 +574,11 @@ def compare_macro_models_fn(
     if models is None:
         models = ["var", "sarimax", "prophet"]
 
-    all_cols = _MACRO_COLS + [target_col]
+    all_cols = cfg.MACRO_COLS + [target_col]
 
     port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
     macro_df = (
-        self.d["portfolio"][["date"] + _MACRO_COLS]
+        self.d["portfolio"][["date"] + cfg.MACRO_COLS]
         .drop_duplicates("date")
         .merge(port_target, on="date", how="left")
         .set_index("date")
@@ -607,7 +606,7 @@ def compare_macro_models_fn(
                 continue
 
             actual = macro_df.loc[target_date]
-            for col in _MACRO_COLS:
+            for col in cfg.MACRO_COLS:
                 if col in fc.columns:
                     errors[col].append(fc[col].values[0] - actual[col])
             errors[target_col].append(pred_target - actual[target_col])

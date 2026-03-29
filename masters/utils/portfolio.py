@@ -1,6 +1,7 @@
 import utils.data_layer as data_layer
 import utils.credit_risk as credit_risk
 import utils.optimization as optimization
+import utils.config as cfg
 from utils.logger import Logger
 from typing import List, Tuple, Dict, Union
 import numpy as np
@@ -13,17 +14,6 @@ log = Logger(__name__)
 
 
 class Portfolio:
-    # --- Constants ---
-    TRADING_DAYS_PER_YEAR: int = 252
-    TRADING_DAYS_PER_MONTH: int = 21
-    MONTHS_PER_YEAR: int = 12
-    BILLION: float = 1e9
-    EPSILON: float = 1e-6
-    DEFAULT_LGD: float = 0.4
-    DEFAULT_LAMBDA_RISK: float = 0.5
-    DEFAULT_VOLATILITY: float = 0.4
-    ROLLING_VOL_WINDOW: int = 63
-
     def __init__(self, dt_calc: str, dt_start: str, stocks_step: int, tickers_list: list[str]):
         self.dt_calc = dt_calc
         self.dt_start = dt_start
@@ -66,7 +56,7 @@ class Portfolio:
         tickers_list: list[str] = None,
         use_backup_data: bool = True,
         update_backup: bool = False,
-        backup_path: str = "data/backup/stocks.pkl",
+        backup_path: str = cfg.BACKUP_STOCKS_PATH,
     ) -> "Portfolio":
         """Loads stock data for the given tickers.
 
@@ -92,7 +82,7 @@ class Portfolio:
         tickers_list: list[str] = None,
         use_backup: bool = True,
         update_backup: bool = False,
-        backup_path: str = "data/backup/multipliers.pkl",
+        backup_path: str = cfg.BACKUP_MULTIPLIERS_PATH,
     ) -> "Portfolio":
         """Loads multipliers data for the given tickers.
 
@@ -122,9 +112,9 @@ class Portfolio:
         update_inflation: bool = False,
         update_rub_usd: bool = False,
         update_unemployment: bool = False,
-        inflation_path: str = "data/macro/inflation.xlsx",
-        rub_usd_path: str = "data/macro/rubusd.csv",
-        unemployment_path: str = "data/macro/unemployment.xlsx",
+        inflation_path: str = cfg.MACRO_INFLATION_PATH,
+        rub_usd_path: str = cfg.MACRO_RUBUSD_PATH,
+        unemployment_path: str = cfg.MACRO_UNEMPLOYMENT_PATH,
     ) -> "Portfolio":
         """Adds macroeconomic data to the portfolio.
 
@@ -562,7 +552,7 @@ class Portfolio:
 
     def plot_macro_significance(
         self,
-        save_path: str = "logs/graphs/macro_significance_summary.png",
+        save_path: str = cfg.MACRO_SIGNIFICANCE_PLOT_PATH,
         verbose: bool = False,
         figsize: tuple = (10, 6),
     ) -> "Portfolio":

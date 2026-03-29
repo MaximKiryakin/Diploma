@@ -89,10 +89,10 @@ def log_missing_values_summary(
     _log_missing_values_summary(logger_obj, missing_dict, title)
 
 
-def _log_dataframe(self, df, title: str = None) -> None:
+def _log_dataframe(self, df, title: str = None, level: int = logging.INFO) -> None:
     """Custom method to log a pandas DataFrame nicely."""
     if df is None or df.empty:
-        self.info(f"{title}: Empty DataFrame")
+        self.log(level, f"{title}: Empty DataFrame")
         return
 
     col_widths = []
@@ -123,9 +123,9 @@ def _log_dataframe(self, df, title: str = None) -> None:
     df_str = header_str + "\n" + "\n".join(row_strings)
 
     if title:
-        self.info(f"{title}\n{df_str}")
+        self.log(level, f"{title}\n{df_str}")
     else:
-        self.info(df_str)
+        self.log(level, df_str)
 
 
 class PrintHandler(logging.Handler):

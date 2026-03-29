@@ -5,11 +5,10 @@ from pathlib import Path
 import re
 import numpy as np
 import pandas as pd
+import utils.config as cfg
 from utils.logger import Logger
 
 log = Logger(__name__)
-
-GRAPHS_DIR = Path("logs/graphs")
 
 
 def _finalize_plot(save_path: str, verbose: bool, dpi: int = 150) -> None:
@@ -48,7 +47,7 @@ def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple
     Uses symmetric log scale to handle large PD spikes alongside near-zero values.
     """
     for ticker in tickers:
-        save_path = str(GRAPHS_DIR / f"{ticker}_pd.png")
+        save_path = str(cfg.GRAPHS_DIR / f"{ticker}_pd.png")
         data = portfolio_df.query(f"ticker == '{ticker}'")
 
         if data.empty:
@@ -82,7 +81,7 @@ def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple
         _finalize_plot(save_path, verbose)
 
     if tickers:
-        log.info("PD graphs saved: %s", GRAPHS_DIR)
+        log.info("PD graphs saved: %s", cfg.GRAPHS_DIR)
 
 
 def calc_irf(
@@ -184,10 +183,10 @@ def calc_irf(
         plt.grid()
         plt.tight_layout()
 
-        save_path = str(GRAPHS_DIR / f"irf_{impulse}_{response}.png")
+        save_path = str(cfg.GRAPHS_DIR / f"irf_{impulse}_{response}.png")
         _finalize_plot(save_path, verbose)
 
-    log.info("Impulse response functions saved | Path: %s", GRAPHS_DIR)
+    log.info("Impulse response functions saved | Path: %s", cfg.GRAPHS_DIR)
 
 
 def plot_correlation_matrix(
@@ -213,7 +212,7 @@ def plot_correlation_matrix(
         verbose: Whether to display the plot interactively.
     """
     if save_path is None:
-        save_path = str(GRAPHS_DIR / "corr_matrix.png")
+        save_path = str(cfg.GRAPHS_DIR / "corr_matrix.png")
 
     pivot_data = portfolio_df.pivot_table(index="date", columns="ticker", values="close")
     pivot_data = pivot_data.interpolate(method="time", limit_direction="both")
@@ -267,7 +266,7 @@ def plot_stocks(
     """
     for ticker in tickers:
         stock_data = portfolio_df[portfolio_df["ticker"] == ticker]
-        save_path = str(GRAPHS_DIR / f"{ticker}_stock.png")
+        save_path = str(cfg.GRAPHS_DIR / f"{ticker}_stock.png")
 
         if stock_data.empty:
             raise ValueError(f"Ticker {ticker} not found in portfolio")
@@ -294,7 +293,7 @@ def plot_stocks(
         _finalize_plot(save_path, verbose, dpi=100)
 
     if tickers:
-        log.info("Stock prices graphs saved: %s", GRAPHS_DIR)
+        log.info("Stock prices graphs saved: %s", cfg.GRAPHS_DIR)
 
 
 def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, figsize: tuple = (12, 5)) -> None:
@@ -325,10 +324,10 @@ def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, 
         plt.legend()
         plt.tight_layout()
 
-        save_path = str(GRAPHS_DIR / f"{ticker}_debt_capitalization.png")
+        save_path = str(cfg.GRAPHS_DIR / f"{ticker}_debt_capitalization.png")
         _finalize_plot(save_path, verbose, dpi=100)
 
-    log.info("Capitalization-debt graphs saved: %s", GRAPHS_DIR)
+    log.info("Capitalization-debt graphs saved: %s", cfg.GRAPHS_DIR)
 
 
 def plot_ticker_dashboards_grid(
@@ -396,7 +395,7 @@ def plot_ticker_dashboards_grid(
             ax.tick_params(axis="x", rotation=90, labelsize=8)
 
     plt.tight_layout()
-    save_path = str(GRAPHS_DIR / "ticker_dashboards.png")
+    save_path = str(cfg.GRAPHS_DIR / "ticker_dashboards.png")
     _finalize_plot(save_path, verbose)
 
 
@@ -418,7 +417,7 @@ def plot_macro_significance(
         raise ValueError("Macro connection summary not calculated.")
 
     if save_path is None:
-        save_path = str(GRAPHS_DIR / "macro_significance_summary.png")
+        save_path = str(cfg.GRAPHS_DIR / "macro_significance_summary.png")
 
     factors = ["inflation", "unemployment", "usd_rub"]
     factor_labels = ["Inflation", "Unemployment", "USD/RUB"]
@@ -544,7 +543,7 @@ def plot_macro_forecast(
     plt.xticks(rotation=90)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "macro_pd_comparison.png")
+    save_path = str(cfg.GRAPHS_DIR / "macro_pd_comparison.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Macro comparison plot saved: {save_path}")
 
@@ -608,7 +607,7 @@ def _plot_metric_forecast(
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / f"{metric}_forecast_comparison.png")
+    save_path = str(cfg.GRAPHS_DIR / f"{metric}_forecast_comparison.png")
     _finalize_plot(save_path, verbose)
     log.info(f"{metric.upper()} forecast comparison plot saved: {save_path}")
 
@@ -660,7 +659,7 @@ def plot_portfolio_allocation(weights: pd.Series, figsize: tuple = (10, 6), verb
     plt.xticks(rotation=90)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "portfolio_allocation.png")
+    save_path = str(cfg.GRAPHS_DIR / "portfolio_allocation.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Portfolio allocation plot saved: {save_path}")
 
@@ -823,7 +822,7 @@ def plot_strategy_comparison(
     plt.xticks(rotation=45)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "strategy_backtest_comparison.png")
+    save_path = str(cfg.GRAPHS_DIR / "strategy_backtest_comparison.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Strategy comparison plot saved: {save_path}")
 
@@ -944,7 +943,7 @@ def plot_amount_strategy_comparison(
     plt.xticks(rotation=45)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "amount_strategy_timeseries.png")
+    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_timeseries.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Amount strategy time-series plot saved: {save_path}")
 
@@ -988,7 +987,7 @@ def plot_amount_strategy_comparison(
     plt.suptitle("Amount-Based Strategy Comparison: Key Metrics", fontsize=14, fontweight="bold")
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "amount_strategy_metrics.png")
+    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_metrics.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Amount strategy metrics plot saved: {save_path}")
 
@@ -1028,6 +1027,6 @@ def plot_macro_model_comparison(
     plt.suptitle("Macro Forecast Model Comparison (Walk-Forward)", fontsize=14, fontweight="bold", y=1.02)
     plt.tight_layout()
 
-    save_path = str(GRAPHS_DIR / "macro_model_comparison.png")
+    save_path = str(cfg.GRAPHS_DIR / "macro_model_comparison.png")
     _finalize_plot(save_path, verbose)
     log.info(f"Macro model comparison plot saved: {save_path}")

@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from io import BytesIO
 from typing import List, Optional
+import utils.config as cfg
 from utils.logger import Logger
 import os
 from tqdm import tqdm
@@ -271,7 +272,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
             if b"<!DOCTYPE html>" not in content[:100] and len(content) > 100:
                 # Save to backup
                 if update_backup:
-                    backup_path = f"data/multiplicators/{company}.csv"
+                    backup_path = f"{cfg.MULTIPLICATORS_DIR}/{company}.csv"
                     os.makedirs(os.path.dirname(backup_path), exist_ok=True)
                     with open(backup_path, "wb") as f:
                         f.write(content)
@@ -288,7 +289,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
         # 2. Fallback to backup CSV
         if df is None:
             try:
-                df = pd.read_csv(f"data/multiplicators/{company}.csv", sep=";")
+                df = pd.read_csv(f"{cfg.MULTIPLICATORS_DIR}/{company}.csv", sep=";")
                 log.info(f"Loaded multipliers for {company} from backup CSV")
             except Exception as e:
                 log.error(f"Failed to load multipliers for {company} from backup: {e}")
@@ -360,7 +361,7 @@ def load_multipliers(companies_list: Optional[List[str]] = None, update_backup: 
 def get_rubusd_exchange_rate(
     dt_calc: str, dt_start: str, update_backup: bool = False, use_backup: bool = False
 ) -> pd.DataFrame:
-    rubusd_df_path = "data/macro/rubusd.csv"
+    rubusd_df_path = cfg.MACRO_RUBUSD_PATH
 
     if use_backup:
         if not os.path.exists(rubusd_df_path):
