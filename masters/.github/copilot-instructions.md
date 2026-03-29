@@ -39,3 +39,10 @@ Follow the **Conventional Commits 1.0.0** specification:
   - implement `backtest_portfolio_strategies` for active vs passive comparison.
   - fix `Backtest Start` marker logic in strategy plots;
   ```
+
+## 5. PDF Reading Rule
+- For any request that involves reading, summarizing, translating, extracting text from, or analyzing a PDF, ALWAYS use the `markitdown` MCP server first.
+- Treat PDF files as requiring tool-based extraction, not visual guessing.
+- First convert the PDF to Markdown with the `markitdown` MCP tool, then work only from the extracted content.
+- If a PDF path is available, use `#markitdown` explicitly before answering.
+- If the PDF cannot be read through `markitdown`, clearly say that the tool failed and ask for another file or path.
