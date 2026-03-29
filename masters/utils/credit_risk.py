@@ -287,7 +287,7 @@ def backtest_pd_fn(
 
     all_results = []
     for m_type in models:
-        log.info(f"Backtesting PD using {m_type} model...")
+        log.info("Backtesting PD using %s model...", m_type)
         for offset in range(n_months, 0, -1):
             predict_pd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
             macro_fc = predict_macro_factors_fn(self, horizon=1, training_offset=offset, model_type=m_type)
@@ -320,7 +320,7 @@ def backtest_dd_fn(
 
     all_results = []
     for m_type in models:
-        log.info(f"Backtesting DD using {m_type} model...")
+        log.info("Backtesting DD using %s model...", m_type)
         for offset in range(n_months, 0, -1):
             predict_dd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
             macro_fc = predict_macro_factors_fn(self, horizon=1, training_offset=offset, model_type=m_type)
@@ -369,9 +369,9 @@ def plot_macro_forecast_fn(
     is_backtest = horizon < 0
     if is_backtest:
         n_months = abs(horizon)
-        log.info(f"Visualizing Expanding Window backtest for last {n_months} months")
+        log.info("Visualizing Expanding Window backtest for last %d months", n_months)
     else:
-        log.info(f"Visualizing Multi-step forecast for {horizon} months")
+        log.info("Visualizing Multi-step forecast for %d months", horizon)
 
     port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
     macro_df = (
@@ -516,12 +516,12 @@ def analyze_macro_dd_significance_fn(
             )
         coef_df = pd.DataFrame(coef_data, columns=["Variable", "Coef", "Std Err", "t-stat", "p-value", "Sig"])
         log.info("\n" + coef_df.to_string(index=False))
-        log.info(f"R-squared: {ols_summary['r_squared']:.4f}, Adj R-squared: {ols_summary['adj_r_squared']:.4f}")
-        log.info(f"F-statistic: {ols_summary['f_statistic']:.2f}, p-value: {ols_summary['f_pvalue']:.2e}")
-        log.info(f"N observations: {ols_summary['n_obs']}")
+        log.info("R-squared: %.4f, Adj R-squared: %.4f", ols_summary["r_squared"], ols_summary["adj_r_squared"])
+        log.info("F-statistic: %.2f, p-value: %.2e", ols_summary["f_statistic"], ols_summary["f_pvalue"])
+        log.info("N observations: %d", ols_summary["n_obs"])
 
         log.info("=" * 80)
-        log.info(f"GRANGER CAUSALITY TESTS (max_lag={max_lag}): macro -> DD")
+        log.info("GRANGER CAUSALITY TESTS (max_lag=%d): macro -> DD", max_lag)
         log.info("=" * 80)
         granger_data = []
         for col in cfg.MACRO_COLS:
@@ -683,4 +683,83 @@ def plot_dd_forecast_fn(
         log.error("No DD forecast found. Run predict_dd() first.")
         return self
     plots.plot_dd_forecast(self.d["dd_forecast"], figsize=figsize, verbose=verbose)
+    return self
+
+
+# ---------------------------------------------------------------------------
+# Impulse response function (VAR analysis)
+# ---------------------------------------------------------------------------
+
+
+def calc_irf_fn(
+    self: "Portfolio",
+    impulses_responses: dict,
+    figsize: tuple = (10, 4),
+    verbose: bool = False,
+) -> "Portfolio":
+    """Fits a VAR model on portfolio data and plots impulse response functions.
+
+    Performs stationarity checks (ADF test), applies first-differencing if
+    needed, selects the optimal lag order via AIC, and delegates plotting
+    to ``plots.plot_irf``.
+
+    Args:
+        self: Portfolio instance.
+        impulses_responses: Dict mapping impulse column names to response column names
+            (e.g., ``{'inflation': 'DD', 'rubusd_exchange_rate': 'DD'}``).
+        figsize: Figure size for each IRF plot.
+        verbose: Whether to display the plot interactively.
+
+    Returns:
+        Portfolio: self.
+    """
+    if impulses_responses is None:
+        raise ValueError("impulses_responses must be specified")
+
+    portfolio_df = self.d["portfolio"]
+    columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
+
+    if "date" in portfolio_df.columns:
+        data = portfolio_df.groupby("date")[columns].mean().sort_index().dropna()
+    else:
+        log.warning("'date' column not found. Using raw data for VAR.")
+        data = portfolio_df.sort_values(["ticker", "date"])[columns].dropna()[columns]
+
+    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+    if constant_cols:
+        log.error("Constant columns detected: %s. VAR requires time-varying data.", constant_cols)
+        data = data.drop(columns=constant_cols)
+        if data.empty or len(data.columns) < 2:
+            log.error("Not enough variables left for VAR analysis.")
+            return self
+
+    pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
+
+    if any(p > 0.05 for p in pvalues.values()):
+        log.info("p-values before differencing:\n%s", pd.Series(pvalues))
+        data = data.diff().dropna()
+        log.info("Applied differencing to achieve stationarity")
+
+        constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+        if constant_cols:
+            log.warning("Constant columns after differencing: %s. Dropping them.", constant_cols)
+            data = data.drop(columns=constant_cols)
+
+        if data.empty or len(data.columns) < 2:
+            log.error("Not enough variables left for VAR analysis after differencing.")
+            return self
+
+        pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
+        log.info("p-values after differencing:\n%s", pd.Series(pvalues))
+
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.RangeIndex(start=0, stop=len(data))
+
+    model = VAR(data)
+    lag_order = model.select_order(maxlags=6)
+    selected_lags = lag_order.aic
+    log.info("Optimal lag number | AIC lags: %d", selected_lags)
+    results = model.fit(maxlags=selected_lags, ic="aic")
+
+    plots.plot_irf(results, impulses_responses, selected_lags, figsize, verbose)
     return self

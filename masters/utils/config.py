@@ -53,7 +53,7 @@ ROLLING_VOL_WINDOW: int = 63
 
 # Names of the macroeconomic factor columns present in the portfolio DataFrame
 # and used in all credit-risk regression and VAR/SARIMAX/Prophet models.
-MACRO_COLS: list = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
+MACRO_COLS: list[str] = ["inflation", "interest_rate", "unemployment_rate", "rubusd_exchange_rate"]
 
 # ---------------------------------------------------------------------------
 # Data paths

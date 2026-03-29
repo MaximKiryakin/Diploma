@@ -51,7 +51,7 @@ def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple
         data = portfolio_df.query(f"ticker == '{ticker}'")
 
         if data.empty:
-            log.warning(f"No data for ticker {ticker}")
+            log.warning("No data for ticker %s", ticker)
             continue
 
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
@@ -84,78 +84,25 @@ def plot_pd_by_tickers(portfolio_df: pd.DataFrame, tickers: list, figsize: tuple
         log.info("PD graphs saved: %s", cfg.GRAPHS_DIR)
 
 
-def calc_irf(
-    portfolio_df: pd.DataFrame,
+def plot_irf(
+    results,
     impulses_responses: dict,
+    selected_lags: int,
     figsize: tuple = (10, 4),
     verbose: bool = False,
 ) -> None:
-    """Calculates and plots impulse response functions for the given impulses and responses.
+    """Plots impulse response functions from a fitted VAR model.
 
     Args:
-        portfolio_df: Portfolio DataFrame with date column and numeric columns for VAR.
+        results: Fitted VAR model results object (statsmodels VARResults).
         impulses_responses: Dict mapping impulse column names to response column names.
+        selected_lags: Number of periods to compute the IRF over.
         figsize: Figure size for each IRF plot.
         verbose: Whether to display the plot interactively.
     """
-    from statsmodels.tsa.api import VAR
-    from statsmodels.tsa.stattools import adfuller
-
-    if impulses_responses is None:
-        raise ValueError("Impulses and responses must be specified")
-
-    columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
-
-    # Group by date to aggregate data across tickers (e.g., mean PD)
-    if "date" in portfolio_df.columns:
-        data = portfolio_df.groupby("date")[columns].mean().sort_index().dropna()
-    else:
-        log.warning("'date' column not found. Using raw data (stacked tickers?) for VAR.")
-        data = portfolio_df.sort_values(["ticker", "date"])[columns].dropna()[columns]
-
-    # Check for constant columns
-    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
-    if constant_cols:
-        log.error(f"Constant columns detected: {constant_cols}. VAR model requires time-varying data.")
-        data = data.drop(columns=constant_cols)
-        if data.empty or len(data.columns) < 2:
-            log.error("Not enough variables left for VAR analysis.")
-            return
-
-    pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
-
-    if any(p > 0.05 for p in pvalues.values()):
-        log.info("p-values before differencing:\n%s", pd.Series(pvalues))
-        data = data.diff().dropna()
-        log.info("Applied differencing to achieve stationarity")
-
-        # Re-check for constant columns after differencing
-        constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
-        if constant_cols:
-            log.warning(f"Constant columns after differencing: {constant_cols}. Dropping them.")
-            data = data.drop(columns=constant_cols)
-
-        if data.empty or len(data.columns) < 2:
-            log.error("Not enough variables left for VAR analysis after differencing.")
-            return
-
-        pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
-        log.info("p-values after differencing:\n%s", pd.Series(pvalues))
-
-    if not isinstance(data.index, pd.DatetimeIndex):
-        data.index = pd.RangeIndex(start=0, stop=len(data))
-
-    model = VAR(data)
-    lag_order = model.select_order(maxlags=6)
-    selected_lags = lag_order.aic
-
-    log.info(f"Optimal lag number calculated | Optimal number of lags: {selected_lags}")
-
-    results = model.fit(maxlags=selected_lags, ic="aic")
-
     for impulse, response in impulses_responses.items():
-        if impulse not in data.columns or response not in data.columns:
-            log.warning(f"Skipping IRF for {impulse} -> {response}: variable missing in data.")
+        if impulse not in results.names or response not in results.names:
+            log.warning("Skipping IRF for %s -> %s: variable missing in data.", impulse, response)
             continue
 
         irf = results.irf(periods=selected_lags)
@@ -187,6 +134,77 @@ def calc_irf(
         _finalize_plot(save_path, verbose)
 
     log.info("Impulse response functions saved | Path: %s", cfg.GRAPHS_DIR)
+
+
+def calc_irf(
+    portfolio_df: pd.DataFrame,
+    impulses_responses: dict,
+    figsize: tuple = (10, 4),
+    verbose: bool = False,
+) -> None:
+    """Calculates and plots impulse response functions for the given impulses and responses.
+
+    .. deprecated::
+        VAR analysis logic has been moved to ``credit_risk.calc_irf_fn``.
+        Call ``Portfolio.calc_irf()`` instead of this function directly.
+
+    Args:
+        portfolio_df: Portfolio DataFrame with date column and numeric columns for VAR.
+        impulses_responses: Dict mapping impulse column names to response column names.
+        figsize: Figure size for each IRF plot.
+        verbose: Whether to display the plot interactively.
+    """
+    from statsmodels.tsa.api import VAR
+    from statsmodels.tsa.stattools import adfuller
+
+    if impulses_responses is None:
+        raise ValueError("Impulses and responses must be specified")
+
+    columns = np.unique(list(impulses_responses.keys()) + list(impulses_responses.values()))
+
+    if "date" in portfolio_df.columns:
+        data = portfolio_df.groupby("date")[columns].mean().sort_index().dropna()
+    else:
+        log.warning("'date' column not found. Using raw data (stacked tickers?) for VAR.")
+        data = portfolio_df.sort_values(["ticker", "date"])[columns].dropna()[columns]
+
+    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+    if constant_cols:
+        log.error("Constant columns detected: %s. VAR model requires time-varying data.", constant_cols)
+        data = data.drop(columns=constant_cols)
+        if data.empty or len(data.columns) < 2:
+            log.error("Not enough variables left for VAR analysis.")
+            return
+
+    pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
+
+    if any(p > 0.05 for p in pvalues.values()):
+        log.info("p-values before differencing:\n%s", pd.Series(pvalues))
+        data = data.diff().dropna()
+        log.info("Applied differencing to achieve stationarity")
+
+        constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+        if constant_cols:
+            log.warning("Constant columns after differencing: %s. Dropping them.", constant_cols)
+            data = data.drop(columns=constant_cols)
+
+        if data.empty or len(data.columns) < 2:
+            log.error("Not enough variables left for VAR analysis after differencing.")
+            return
+
+        pvalues = {col: adfuller(data[col].dropna())[1] for col in data.columns}
+        log.info("p-values after differencing:\n%s", pd.Series(pvalues))
+
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.RangeIndex(start=0, stop=len(data))
+
+    model = VAR(data)
+    lag_order = model.select_order(maxlags=6)
+    selected_lags = lag_order.aic
+    log.info("Optimal lag number calculated | Optimal number of lags: %d", selected_lags)
+    results = model.fit(maxlags=selected_lags, ic="aic")
+
+    plot_irf(results, impulses_responses, selected_lags, figsize, verbose)
 
 
 def plot_correlation_matrix(
@@ -245,7 +263,7 @@ def plot_correlation_matrix(
     plt.tight_layout()
 
     _finalize_plot(save_path, verbose, dpi=dpi)
-    log.info(f"Correlation matrix saved | Path: {save_path}")
+    log.info("Correlation matrix saved | Path: %s", save_path)
 
 
 def plot_stocks(
@@ -467,7 +485,7 @@ def plot_macro_significance(
     plt.tight_layout()
 
     _finalize_plot(save_path, verbose, dpi=300)
-    log.info(f"Macro significance plot saved | Path: {save_path}")
+    log.info("Macro significance plot saved | Path: %s", save_path)
 
 
 def plot_macro_forecast(
@@ -545,7 +563,7 @@ def plot_macro_forecast(
 
     save_path = str(cfg.GRAPHS_DIR / "macro_pd_comparison.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Macro comparison plot saved: {save_path}")
+    log.info("Macro comparison plot saved: %s", save_path)
 
 
 def _plot_metric_forecast(
@@ -566,7 +584,7 @@ def _plot_metric_forecast(
     reference_col = f"reference_{metric}"
 
     if forecast_df.empty:
-        log.warning(f"Forecast DataFrame is empty. Cannot plot {metric.upper()} forecast.")
+        log.warning("Forecast DataFrame is empty. Cannot plot %s forecast.", metric.upper())
         return
 
     is_pd = metric == "pd"
@@ -609,7 +627,7 @@ def _plot_metric_forecast(
 
     save_path = str(cfg.GRAPHS_DIR / f"{metric}_forecast_comparison.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"{metric.upper()} forecast comparison plot saved: {save_path}")
+    log.info("%s forecast comparison plot saved: %s", metric.upper(), save_path)
 
 
 def plot_pd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbose: bool = False) -> None:
@@ -661,7 +679,7 @@ def plot_portfolio_allocation(weights: pd.Series, figsize: tuple = (10, 6), verb
 
     save_path = str(cfg.GRAPHS_DIR / "portfolio_allocation.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Portfolio allocation plot saved: {save_path}")
+    log.info("Portfolio allocation plot saved: %s", save_path)
 
 
 def plot_strategy_comparison(
@@ -824,7 +842,7 @@ def plot_strategy_comparison(
 
     save_path = str(cfg.GRAPHS_DIR / "strategy_backtest_comparison.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Strategy comparison plot saved: {save_path}")
+    log.info("Strategy comparison plot saved: %s", save_path)
 
 
 def plot_amount_strategy_comparison(
@@ -945,7 +963,7 @@ def plot_amount_strategy_comparison(
 
     save_path = str(cfg.GRAPHS_DIR / "amount_strategy_timeseries.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Amount strategy time-series plot saved: {save_path}")
+    log.info("Amount strategy time-series plot saved: %s", save_path)
 
     # --- Figure 2: Bar chart of summary metrics ---
     if comparison_df is None or comparison_df.empty:
@@ -989,7 +1007,7 @@ def plot_amount_strategy_comparison(
 
     save_path = str(cfg.GRAPHS_DIR / "amount_strategy_metrics.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Amount strategy metrics plot saved: {save_path}")
+    log.info("Amount strategy metrics plot saved: %s", save_path)
 
 
 def plot_macro_model_comparison(
@@ -1029,4 +1047,4 @@ def plot_macro_model_comparison(
 
     save_path = str(cfg.GRAPHS_DIR / "macro_model_comparison.png")
     _finalize_plot(save_path, verbose)
-    log.info(f"Macro model comparison plot saved: {save_path}")
+    log.info("Macro model comparison plot saved: %s", save_path)

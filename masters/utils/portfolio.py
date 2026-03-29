@@ -26,12 +26,11 @@ class Portfolio:
         self.end_time = None
         self.start_time = None
 
-    def log_system_info(self):
-        """
-        Logs system information.
+    def log_system_info(self) -> "Portfolio":
+        """Logs system information and configuration parameters.
 
         Returns:
-            Portfolio: Updated portfolio with logged system information.
+            Portfolio: self with start_time set.
         """
         self.start_time = datetime.now()
 
@@ -273,15 +272,14 @@ class Portfolio:
         return optimization.calc_portfolio_metrics_fn(self, lgd=lgd)
 
     def plot_portfolio_allocation(self, figsize: tuple = (10, 6), verbose: bool = False) -> "Portfolio":
-        """
-        Plots the optimized portfolio allocation.
+        """Plots the optimized portfolio allocation.
 
         Args:
-            figsize (tuple): Figure size.
-            verbose (bool): Whether to show the plot.
+            figsize: Figure size.
+            verbose: Whether to show the plot.
 
         Returns:
-            Portfolio: Self.
+            Portfolio: self.
         """
         if "optimized_weights" not in self.d:
             log.error("No optimized weights found. Run optimize_portfolio() first.")
@@ -374,9 +372,15 @@ class Portfolio:
             cvar_alpha=cvar_alpha,
         )
 
-    def plot_strategy_backtest(self, tail: int = 12, verbose: bool = False):
-        """
-        Plots the comparison of cumulative returns and EL between strategies.
+    def plot_strategy_backtest(self, tail: int = 12, verbose: bool = False) -> "Portfolio":
+        """Plots the comparison of cumulative returns and EL between strategies.
+
+        Args:
+            tail: Number of recent periods to display.
+            verbose: Whether to show the plot interactively.
+
+        Returns:
+            Portfolio: self.
         """
         if "strategy_backtest" not in self.d:
             log.error("No strategy backtest results found.")
@@ -441,28 +445,29 @@ class Portfolio:
         return self
 
     def plot_ticker_dashboards(self, tickers: list, figsize_row: tuple = (18, 5), verbose: bool = False) -> "Portfolio":
-        """
-        Plots Stock, PD and Cap/Debt dashboards for each ticker in a grid.
+        """Plots Stock, PD and Cap/Debt dashboards for each ticker in a grid.
 
         Args:
-            tickers (list): List of tickers to plot.
-            figsize_row (tuple): Size of one ticker row (3 subplots).
-            verbose (bool): Whether to show the plot.
+            tickers: List of tickers to plot.
+            figsize_row: Size of one ticker row (3 subplots).
+            verbose: Whether to show the plot interactively.
+
+        Returns:
+            Portfolio: self.
         """
         plots.plot_ticker_dashboards_grid(self.d["portfolio"], tickers, figsize_row=figsize_row, verbose=verbose)
         return self
 
     def plot_pd_by_tickers(self, tickers: list, figsize: tuple = (12, 5), verbose: bool = False) -> "Portfolio":
-        """
-        Plots the probability of default (PD) for the given tickers.
+        """Plots the probability of default (PD) for the given tickers.
 
         Args:
-            tickers (list): List of stock tickers (e.g., ['GAZP', 'FESH']).
-            figsize (tuple): Size of the plot. Default is (12, 6).
-            verbose (bool): If True, displays the plot. If False, saves the plot to a file.
+            tickers: List of stock tickers (e.g., ['GAZP', 'FESH']).
+            figsize: Figure size.
+            verbose: If True, displays the plot. If False, saves to file.
 
         Returns:
-            Portfolio: Updated portfolio with plotted probabilities of default.
+            Portfolio: self.
         """
         plots.plot_pd_by_tickers(self.d["portfolio"], tickers, figsize, verbose)
         return self
@@ -473,20 +478,18 @@ class Portfolio:
         figsize: Tuple[int, int] = (12, 5),
         verbose: bool = False,
     ) -> "Portfolio":
-        """
-        Calculates impulse response functions for the given impulses and responses.
+        """Calculates impulse response functions for the given impulses and responses.
 
         Args:
-            impulses_responses (dict[str, str], optional): Dictionary of impulses and responses
-            (e.g., {'interest_rate': 'PD', 'inflation': 'PD'}).
-            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
-            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+            impulses_responses: Dict mapping impulse columns to response columns
+                (e.g., {'interest_rate': 'PD', 'inflation': 'PD'}).
+            figsize: Figure size.
+            verbose: If True, displays the plot. If False, saves to file.
 
         Returns:
-            Portfolio: Updated portfolio with calculated impulse response functions.
+            Portfolio: self.
         """
-        plots.calc_irf(self.d["portfolio"], impulses_responses, figsize, verbose)
-        return self
+        return credit_risk.calc_irf_fn(self, impulses_responses, figsize, verbose)
 
     def plot_correlation_matrix(
         self,
@@ -497,19 +500,18 @@ class Portfolio:
         annot_size: int = 8,
         verbose: bool = False,
     ) -> "Portfolio":
-        """
-        Plots and saves the correlation matrix of stock closing prices.
+        """Plots and saves the correlation matrix of stock closing prices.
 
         Args:
-            custom_order (list): Order of tickers for grouping.
-            save_path (str, optional): Path to save the plot (None - do not save).
-            figsize (tuple[int, int], optional): Size of the plot. Default is (15, 10).
-            dpi (int, optional): Quality of saving. Default is 300.
-            annot_size (int, optional): Size of annotations. Default is 8.
-            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
+            custom_order: Order of tickers for grouping.
+            save_path: Path to save the plot (None uses default path).
+            figsize: Figure size.
+            dpi: Image resolution.
+            annot_size: Font size for correlation annotations.
+            verbose: If True, displays the plot. If False, saves to file.
 
         Returns:
-            Portfolio: Updated portfolio with plotted correlation matrix.
+            Portfolio: self.
         """
         plots.plot_correlation_matrix(self.d["portfolio"], custom_order, save_path, figsize, dpi, annot_size, verbose)
         return self
@@ -521,31 +523,29 @@ class Portfolio:
         verbose: bool = False,
         fontsize: int = 16,
     ) -> "Portfolio":
-        """
-        Plots stock charts for the given tickers.
+        """Plots stock charts for the given tickers.
 
         Args:
-            tickers (list[str]): List of stock tickers (e.g., ['FESH', 'GAZP']).
-            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
-            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
-            fontsize (int, optional): Font size for the plot. Default is 16.
+            tickers: List of stock tickers (e.g., ['FESH', 'GAZP']).
+            figsize: Figure size.
+            verbose: If True, displays the plot. If False, saves to file.
+            fontsize: Title font size.
 
         Returns:
-            Portfolio: Updated portfolio with plotted stock charts.
+            Portfolio: self.
         """
         plots.plot_stocks(self.d["portfolio"], tickers, figsize, verbose, fontsize)
         return self
 
-    def plot_debt_capitalization(self, verbose=False, figsize=(10, 4)):
-        """
-        Plots a combined chart of capitalization and debt on the same Y-axis.
+    def plot_debt_capitalization(self, verbose: bool = False, figsize: tuple = (10, 4)) -> "Portfolio":
+        """Plots a combined chart of capitalization and debt on the same Y-axis.
 
         Args:
-            verbose (bool, optional): If True, displays the plot. If False, saves the plot to a file.
-            figsize (tuple[int, int], optional): Size of the plot. Default is (10, 5).
+            verbose: If True, displays the plot. If False, saves to file.
+            figsize: Figure size.
 
         Returns:
-            Portfolio: Updated portfolio with plotted capitalization and debt.
+            Portfolio: self.
         """
         plots.plot_debt_capitalization(self.d["portfolio"], verbose, figsize)
         return self
@@ -556,16 +556,15 @@ class Portfolio:
         verbose: bool = False,
         figsize: tuple = (10, 6),
     ) -> "Portfolio":
-        """
-        Plots the significance of macroeconomic factors on Merton model parameters.
+        """Plots the significance of macroeconomic factors on Merton model parameters.
 
         Args:
-            save_path (str): Path to save the plot. Default is "logs/graphs/macro_significance_summary.png".
-            verbose (bool): If True, displays the plot. If False, saves the plot to a file. Default is False.
-            figsize (tuple): Size of the plot. Default is (10, 6).
+            save_path: Path to save the plot.
+            verbose: If True, displays the plot. If False, saves to file.
+            figsize: Figure size.
 
         Returns:
-            Portfolio: Updated portfolio with plotted macro significance.
+            Portfolio: self.
         """
         plots.plot_macro_significance(self.d["macro_connection_summary"], save_path, verbose, figsize)
         return self
@@ -688,12 +687,11 @@ class Portfolio:
         )
         return self
 
-    def log_completion(self):
-        """
-        Logs the completion of the analysis.
+    def log_completion(self) -> "Portfolio":
+        """Logs the duration and completion of the analysis.
 
         Returns:
-            Portfolio: Updated portfolio with logged completion.
+            Portfolio: self.
         """
 
         self.end_time = datetime.now()

@@ -2,7 +2,7 @@ import warnings
 import logging
 
 
-def setup_enviroment() -> None:
+def setup_environment() -> None:
     """Sets up the environment by silencing loggers and ignoring specific warnings."""
     # Completely silence cmdstanpy and fbprophet
     logging.getLogger("cmdstanpy").addHandler(logging.NullHandler())

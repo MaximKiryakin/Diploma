@@ -155,7 +155,7 @@ def _solve_cvar_fn(
         log.error("CVaR optimization failed: %s", res.message)
         return None
 
-    log.info("CVaR(%.0f%%) = %.6f (daily), VaR(zeta) = %.6f", alpha * 100, res.fun, res.x[n])
+    log.debug("CVaR(%.0f%%) = %.6f (daily), VaR(zeta) = %.6f", alpha * 100, res.fun, res.x[n])
     return res.x[:n]
 
 
@@ -435,7 +435,7 @@ def backtest_portfolio_strategies_fn(
         )
 
     if len(monthly_returns) < n_months:
-        log.error(f"Insufficient history for {n_months} months backtest.")
+        log.error("Insufficient history for %d months backtest.", n_months)
         return self
 
     strat_state: Dict[str, dict] = {}
@@ -876,7 +876,7 @@ def backtest_portfolio_with_amounts_fn(
         log.warning("Tickers missing from returns data: %s", missing)
 
     if len(monthly_returns) < n_months:
-        log.error(f"Insufficient history for {n_months} months backtest.")
+        log.error("Insufficient history for %d months backtest.", n_months)
         return self
 
     if "term" in loan_applications.columns:
@@ -890,11 +890,11 @@ def backtest_portfolio_with_amounts_fn(
     total_rebalances = 0
     weight_history = []
 
-    log.info(f"Starting amount-based backtest for {n_months} months " f"(budget={budget:,.0f}, model={model_type})...")
+    log.debug("Starting amount-based backtest for %d months (budget=%.0f, model=%s)...", n_months, budget, model_type)
 
     for offset in range(n_months, 0, -1):
         target_date = monthly_returns.index[-offset]
-        log.info(f"Amount backtest month: {target_date.strftime('%Y-%m')}")
+        log.debug("Amount backtest month: %s", target_date.strftime("%Y-%m"))
 
         active_tickers_month = [t for t in available_tickers if remaining_terms[t] > 0]
         n_active = len(active_tickers_month)
@@ -1049,7 +1049,7 @@ def backtest_portfolio_with_amounts_fn(
     self.d["amount_weight_history"] = pd.DataFrame(weight_history).set_index("date")
 
     log.log_dataframe(summary.reset_index(), title="Amount-Based Strategy Comparison")
-    log.info(f"Amount-based backtest completed. Rebalances: {total_rebalances}/{n_months}")
+    log.info("Amount-based backtest completed. Rebalances: %d/%d", total_rebalances, n_months)
     return self
 
 

@@ -63,17 +63,17 @@ pre-commit install
    ```bash
    pre-commit install
    ```
-3. Откройте `main.ipynb` и запустите ячейки. Система автоматически настроит окружение через `setup_enviroment()`.
+3. Откройте `main.ipynb` и запустите ячейки. Система автоматически настроит окружение через `setup_environment()`.
 
 ---
 
 ## Пример использования (API)
 ```python
-from utils.setup import setup_enviroment
+from utils.setup import setup_environment
 from utils.portfolio import Portfolio
 
 # 1. Инициализация и настройка
-setup_enviroment()
+setup_environment()
 calc = Portfolio(dt_calc='2025-09-30', dt_start='2019-03-31', tickers_list=tickers)
 
 # 2. Загрузка данных (рыночные + макро)
