@@ -828,6 +828,171 @@ def plot_strategy_comparison(
     log.info(f"Strategy comparison plot saved: {save_path}")
 
 
+def plot_amount_strategy_comparison(
+    all_backtests: dict,
+    comparison_df: pd.DataFrame,
+    tail: int = 12,
+    verbose: bool = False,
+) -> None:
+    """Plots multi-strategy comparison for amount-based backtests.
+
+    Produces two figures:
+    1. Time-series: cumulative net income, realized EL, credit income per strategy.
+    2. Bar chart: key summary metrics (RAROC, EL, Vol, Net Income) across strategies.
+
+    Args:
+        all_backtests: Dict mapping strategy name -> backtest DataFrame.
+        comparison_df: Summary DataFrame indexed by strategy name.
+        tail: Number of last periods to show (0 = all).
+        verbose: Whether to display plots interactively.
+    """
+    if not all_backtests:
+        log.warning("No amount-based backtest results to plot.")
+        return
+
+    strategy_colors = {
+        "mean_el": "#1f77b4",
+        "cvar": "#ff7f0e",
+        "risk_parity": "#2ca02c",
+    }
+    strategy_labels = {
+        "mean_el": "Mean-EL",
+        "cvar": "CVaR",
+        "risk_parity": "Risk Parity",
+    }
+
+    # --- Figure 1: Time-series (3 subplots) ---
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(13, 14), sharex=True)
+
+    for strat_name, bt_df in all_backtests.items():
+        plot_df = bt_df.tail(tail) if tail > 0 else bt_df
+        plot_df = plot_df.copy()
+        plot_df["Active_CumNet"] = (1 + plot_df["Active_Net"]).cumprod() - 1
+        color = strategy_colors.get(strat_name, None)
+        label = strategy_labels.get(strat_name, strat_name)
+
+        ax1.plot(
+            plot_df.index,
+            plot_df["Active_CumNet"] * 100,
+            label=label,
+            linewidth=2.5,
+            marker="o",
+            markersize=3,
+            color=color,
+        )
+        ax2.plot(
+            plot_df.index,
+            plot_df["Active_EL"] * 100,
+            label=f"{label}",
+            linewidth=2,
+            color=color,
+        )
+        ax3.plot(
+            plot_df.index,
+            plot_df["Active_Credit_Income"] * 100,
+            label=f"{label}",
+            linewidth=2,
+            color=color,
+        )
+
+    # Passive baseline from last strategy backtest
+    last_bt = list(all_backtests.values())[-1]
+    plot_passive = last_bt.tail(tail) if tail > 0 else last_bt
+    plot_passive = plot_passive.copy()
+    plot_passive["Passive_CumNet"] = (1 + plot_passive["Passive_Net"]).cumprod() - 1
+
+    ax1.plot(
+        plot_passive.index,
+        plot_passive["Passive_CumNet"] * 100,
+        label="Passive (Equal)",
+        linewidth=2,
+        linestyle="--",
+        color="gray",
+        alpha=0.8,
+    )
+    ax2.plot(
+        plot_passive.index,
+        plot_passive["Passive_EL"] * 100,
+        label="Passive",
+        color="gray",
+        linestyle="--",
+    )
+    ax3.plot(
+        plot_passive.index,
+        plot_passive["Passive_Credit_Income"] * 100,
+        label="Passive",
+        color="gray",
+        linestyle="--",
+    )
+
+    ax1.set_title("Cumulative Net Income (Market Return + Credit Income - EL)", fontsize=13, fontweight="bold")
+    ax1.set_ylabel("Cumulative Net Income (%)", fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left")
+
+    ax2.set_title("Monthly Realized Expected Loss (EL)", fontsize=13, fontweight="bold")
+    ax2.set_ylabel("EL (%)", fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper left")
+
+    ax3.set_title("Monthly Credit Income (Interest Rate Revenue)", fontsize=13, fontweight="bold")
+    ax3.set_ylabel("Credit Income (%)", fontsize=11)
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper left")
+
+    plt.xlabel("Date", fontsize=11)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    save_path = str(GRAPHS_DIR / "amount_strategy_timeseries.png")
+    _finalize_plot(save_path, verbose)
+    log.info(f"Amount strategy time-series plot saved: {save_path}")
+
+    # --- Figure 2: Bar chart of summary metrics ---
+    if comparison_df is None or comparison_df.empty:
+        return
+
+    metrics_to_plot = ["Avg Net Income (%)", "Avg Realized EL (%)", "Realized Vol (%)", "RAROC (%)"]
+    available_metrics = [m for m in metrics_to_plot if m in comparison_df.columns]
+    if not available_metrics:
+        return
+
+    n_metrics = len(available_metrics)
+    fig, axes = plt.subplots(1, n_metrics, figsize=(4 * n_metrics, 5))
+    if n_metrics == 1:
+        axes = [axes]
+
+    bar_colors = []
+    for strat in comparison_df.index:
+        bar_colors.append(strategy_colors.get(strat, "gray"))
+
+    for ax, metric in zip(axes, available_metrics):
+        values = comparison_df[metric]
+        bars = ax.bar(range(len(values)), values, color=bar_colors, edgecolor="black", linewidth=0.5)
+        ax.set_title(metric, fontsize=11, fontweight="bold")
+        ax.set_xticks(range(len(values)))
+        labels = [strategy_labels.get(s, s) for s in comparison_df.index]
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+        ax.grid(True, alpha=0.2, axis="y")
+
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    plt.suptitle("Amount-Based Strategy Comparison: Key Metrics", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    save_path = str(GRAPHS_DIR / "amount_strategy_metrics.png")
+    _finalize_plot(save_path, verbose)
+    log.info(f"Amount strategy metrics plot saved: {save_path}")
+
+
 def plot_macro_model_comparison(
     comparison_df: pd.DataFrame,
     verbose: bool = False,

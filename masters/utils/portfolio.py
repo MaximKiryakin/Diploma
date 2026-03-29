@@ -2126,6 +2126,605 @@ class Portfolio:
         plots.plot_macro_significance(self.d["macro_connection_summary"], save_path, verbose, figsize)
         return self
 
+    def optimize_portfolio_with_amounts(
+        self,
+        loan_applications: pd.DataFrame,
+        budget: float,
+        lambda_return: float = 0.5,
+        lambda_vol: float = 0.25,
+        lambda_el: float = 0.25,
+        max_sector_share: float = 0.3,
+        sector_map: Dict[str, str] = None,
+        cutoff_date: pd.Timestamp = None,
+        strategy: str = "mean_el",
+        cvar_alpha: float = 0.95,
+    ) -> "Portfolio":
+        """Optimizes portfolio allocations using real loan amounts and return maximization.
+
+        Solves a multi-objective optimization problem that balances risk-adjusted
+        return and a risk measure subject to budget, per-application, and sector
+        concentration constraints.  The risk measure depends on ``strategy``:
+
+        - ``mean_el``: volatility + expected loss (default)
+        - ``cvar``: CVaR_alpha (empirical tail risk) + expected loss
+        - ``risk_parity``: equal credit-risk-contribution deviation + return
+
+        Objective (mean_el):
+            J(x) = -lambda_return * (sum x_i * R_i / B)
+                   + lambda_vol * sqrt(w^T Sigma w)
+                   + lambda_el  * sum(w_i * PD_i^cum * LGD_i * 12/T_i)  -> min
+
+        where R_i = rate_i * (1 - PD_i^cum) - PD_i^cum * LGD_i * 12/T_i
+        is the annualized risk-adjusted return,
+        PD_i^cum = 1 - (1 - PD_i^ann)^(T_i/12) is the cumulative PD
+        over the loan term T_i (months), and w_i = x_i / sum(x).
+
+        Args:
+            loan_applications: DataFrame with columns [ticker, amount, rate, lgd]
+                and optional ``term`` (loan maturity in months, default 12).
+                ``amount`` is the requested loan size (same currency as ``budget``).
+                ``rate`` is the annualized interest rate (e.g. 0.15 for 15%).
+                ``lgd`` is the loss given default per application.
+            budget: Total lending budget (same currency as amounts).
+            lambda_return: Weight for return maximization component (0-1).
+            lambda_vol: Weight for risk measure component (0-1).
+            lambda_el: Weight for expected loss minimization component (0-1).
+            max_sector_share: Maximum share of budget per sector (0-1).
+            sector_map: Dict mapping ticker -> sector name. If None, no sector
+                constraints are applied.
+            cutoff_date: If provided, only use return data up to this date for
+                covariance estimation (prevents look-ahead bias).
+            strategy: Risk measure to use: 'mean_el', 'cvar', 'risk_parity'.
+            cvar_alpha: CVaR confidence level (only for strategy='cvar').
+
+        Returns:
+            Portfolio: Self with results in self.d['loan_allocations'] and
+                self.d['optimized_weights'].
+        """
+        tickers = loan_applications["ticker"].tolist()
+        amounts = loan_applications["amount"].values.astype(float)
+        rates = loan_applications["rate"].values.astype(float)
+        lgds = loan_applications["lgd"].values.astype(float)
+        terms = (
+            loan_applications["term"].values.astype(float)
+            if "term" in loan_applications.columns
+            else np.full(len(tickers), 12.0)
+        )
+        n = len(tickers)
+
+        if "dd_forecast" in self.d:
+            pds = self.d["dd_forecast"]["predicted_pd"].loc[tickers].values.astype(float)
+            log.info("Using predicted PDs (from DD model) for amount-based optimization.")
+        elif "pd_forecast" in self.d:
+            pds = self.d["pd_forecast"]["predicted_pd"].loc[tickers].values.astype(float)
+            log.info("Using predicted PDs for amount-based optimization.")
+        else:
+            latest_date = self.d["portfolio"]["date"].max()
+            pds = (
+                self.d["portfolio"][self.d["portfolio"]["date"] == latest_date]
+                .set_index("ticker")
+                .loc[tickers]["PD"]
+                .values.astype(float)
+            )
+            log.info("Using historical PDs for amount-based optimization.")
+
+        pd_cum = 1.0 - (1.0 - pds) ** (terms / 12.0)
+        risk_adj_return = rates * (1.0 - pd_cum) - pd_cum * lgds * 12.0 / terms
+
+        returns_df = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
+        returns_df = np.log(returns_df / returns_df.shift(1)).dropna()
+        if cutoff_date is not None:
+            returns_df = returns_df.loc[returns_df.index < cutoff_date]
+        returns_matrix = returns_df[tickers].values
+        cov_matrix = returns_df[tickers].cov().values * self.TRADING_DAYS_PER_YEAR
+
+        el_annual = pd_cum * lgds * 12.0 / terms
+
+        daily_el = (pd_cum * lgds) / self.TRADING_DAYS_PER_YEAR
+        adjusted_returns = returns_matrix - daily_el.reshape(1, n)
+
+        # Objective functions use z = x / budget (fractional budget allocation).
+        # This rescaling makes gradients O(rate) ~ 0.1 instead of O(rate/budget) ~ 5e-12,
+        # which is required for SLSQP to detect a non-zero gradient and move away from x0.
+        if strategy == "mean_el":
+
+            def objective(z: np.ndarray) -> float:
+                total = z.sum() + self.EPSILON
+                w = z / total
+                income = np.sum(z * risk_adj_return)  # = sum(x*r)/budget since z=x/budget
+                port_vol = np.sqrt(w @ cov_matrix @ w)
+                el = np.sum(w * el_annual)
+                return -lambda_return * income + lambda_vol * port_vol + lambda_el * el
+
+        elif strategy == "cvar":
+
+            def objective(z: np.ndarray) -> float:
+                total = z.sum() + self.EPSILON
+                w = z / total
+                income = np.sum(z * risk_adj_return)
+                port_losses = -(adjusted_returns @ w)
+                sorted_losses = np.sort(port_losses)[::-1]
+                cutoff = max(int(np.ceil((1 - cvar_alpha) * len(sorted_losses))), 1)
+                cvar_val = np.mean(sorted_losses[:cutoff]) * np.sqrt(self.TRADING_DAYS_PER_YEAR)
+                el = np.sum(w * el_annual)
+                return -lambda_return * income + lambda_vol * cvar_val + lambda_el * el
+
+        elif strategy == "risk_parity":
+
+            def objective(z: np.ndarray) -> float:
+                total = z.sum() + self.EPSILON
+                w = z / total
+                income = np.sum(z * risk_adj_return)
+                sigma_w = cov_matrix @ w
+                port_vol = np.sqrt(w @ sigma_w + self.EPSILON)
+                mrc = w * sigma_w / (port_vol + self.EPSILON)
+                crc = mrc + w * el_annual
+                total_crc = crc.sum() + self.EPSILON
+                crc_norm = crc / total_crc
+                target = 1.0 / n
+                diff_sum = float(np.sum((crc_norm - target) ** 2))
+                return -lambda_return * income + lambda_vol * diff_sum
+
+        else:
+            log.error("Unknown strategy '%s'. Use 'mean_el', 'cvar', or 'risk_parity'.", strategy)
+            return self
+
+        log.info("Amount-based optimization: strategy=%s", strategy)
+
+        # Decision variable z = x/budget; constraints expressed in fractional units.
+        constraints = [{"type": "ineq", "fun": lambda z: 1.0 - np.sum(z)}]
+
+        if sector_map is not None:
+            sectors = set(sector_map.values())
+            for sector in sectors:
+                idx = [i for i, t in enumerate(tickers) if sector_map.get(t) == sector]
+                if idx:
+                    constraints.append(
+                        {
+                            "type": "ineq",
+                            "fun": lambda z, _idx=idx: max_sector_share - sum(z[i] for i in _idx),
+                        }
+                    )
+
+        bounds = tuple((0.0, a / budget) for a in amounts)
+        x0 = np.minimum(amounts, budget / n) / budget
+
+        res = minimize(
+            objective,
+            x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-9, "maxiter": 1000},
+        )
+
+        if not res.success:
+            log.error("Amount-based optimization failed: %s", res.message)
+            return self
+
+        approved = res.x * budget
+        total_approved = approved.sum()
+
+        self.d["loan_allocations"] = pd.DataFrame(
+            {
+                "ticker": tickers,
+                "requested": amounts,
+                "approved": approved,
+                "approval_rate": approved / np.where(amounts > 0, amounts, self.EPSILON),
+                "weight": approved / (total_approved + self.EPSILON),
+                "rate": rates,
+                "term": terms,
+                "pd": pds,
+                "pd_cum": pd_cum,
+                "lgd": lgds,
+                "risk_adj_return": risk_adj_return,
+                "expected_income": approved * risk_adj_return,
+                "expected_loss": approved * pd_cum * lgds,
+            }
+        )
+
+        weights = approved / (total_approved + self.EPSILON)
+        self.d["optimized_weights"] = pd.Series(weights, index=tickers, name="weight")
+
+        total_income = np.sum(approved * risk_adj_return)
+        total_el = np.sum(approved * pd_cum * lgds * 12.0 / terms)
+        port_vol = np.sqrt(weights @ cov_matrix @ weights)
+
+        metrics = {
+            "Budget": budget,
+            "Total Approved": total_approved,
+            "Budget Utilization (%)": total_approved / budget * 100,
+            "Expected Income": total_income,
+            "Expected Loss": total_el,
+            "Net Expected Income": total_income - total_el,
+            "RAROC (%)": (total_income / (total_approved + self.EPSILON)) * 100,
+            "Portfolio Volatility (%)": port_vol * 100,
+            "Applications": n,
+            "Fully Approved": int(np.sum(np.isclose(approved, amounts, rtol=0.01))),
+            "Partially Approved": int(np.sum((approved > 0) & (~np.isclose(approved, amounts, rtol=0.01)))),
+            "Rejected": int(np.sum(approved < self.EPSILON)),
+        }
+        self.d["loan_metrics"] = pd.DataFrame(list(metrics.items()), columns=["Metric", "Value"])
+
+        log.log_dataframe(self.d["loan_allocations"], title="Loan Allocations")
+        log.log_dataframe(self.d["loan_metrics"], title="Loan Portfolio Metrics")
+        log.info("Amount-based portfolio optimization completed successfully.")
+
+        return self
+
+    def backtest_portfolio_with_amounts(
+        self,
+        loan_applications: pd.DataFrame,
+        budget: float,
+        n_months: int = 12,
+        lambda_return: float = 0.5,
+        lambda_vol: float = 0.25,
+        lambda_el: float = 0.25,
+        model_type: str = "var",
+        max_sector_share: float = 0.3,
+        sector_map: Dict[str, str] = None,
+        rebalance_threshold: float = 0.05,
+        transaction_cost: float = 0.001,
+        strategy: str = "mean_el",
+        cvar_alpha: float = 0.95,
+    ) -> "Portfolio":
+        """Backtests the amount-based optimization strategy vs equal allocation.
+
+        Runs walk-forward backtest: at each month, predicts DD, solves the
+        amount-based optimization, and compares against naive equal allocation
+        of the budget across all applications.
+
+        Args:
+            loan_applications: DataFrame with columns [ticker, amount, rate, lgd]
+                and optional ``term`` (loan maturity in months, default 12).
+            budget: Total lending budget.
+            n_months: Number of months for the backtest window.
+            lambda_return: Weight for return component.
+            lambda_vol: Weight for risk measure component.
+            lambda_el: Weight for expected loss component.
+            model_type: Macro model for DD forecasts.
+            max_sector_share: Maximum share of budget per sector.
+            sector_map: Dict mapping ticker -> sector.
+            rebalance_threshold: Max weight drift before rebalancing.
+            transaction_cost: One-way proportional cost per unit of turnover.
+            strategy: Risk measure: 'mean_el', 'cvar', 'risk_parity'.
+            cvar_alpha: CVaR confidence level (only for strategy='cvar').
+
+        Returns:
+            Portfolio: Self with results in self.d['amount_backtest'].
+        """
+        tickers = loan_applications["ticker"].tolist()
+        rates = loan_applications.set_index("ticker")["rate"]
+        lgds_map = loan_applications.set_index("ticker")["lgd"]
+
+        prices_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
+        monthly_prices = prices_pivot.resample("ME").last()
+        monthly_returns = monthly_prices.pct_change().dropna()
+
+        pd_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="PD")
+        monthly_pds = pd_pivot.resample("ME").last().dropna()
+
+        common_index = monthly_returns.index.intersection(monthly_pds.index)
+        monthly_returns = monthly_returns.loc[common_index]
+        monthly_pds = monthly_pds.loc[common_index]
+
+        available_tickers = [t for t in tickers if t in monthly_returns.columns]
+        if len(available_tickers) < len(tickers):
+            missing = set(tickers) - set(available_tickers)
+            log.warning("Tickers missing from returns data: %s", missing)
+
+        if len(monthly_returns) < n_months:
+            log.error(f"Insufficient history for {n_months} months backtest.")
+            return self
+
+        if "term" in loan_applications.columns:
+            terms_map = loan_applications.set_index("ticker")["term"].astype(float)
+        else:
+            terms_map = pd.Series(12.0, index=loan_applications["ticker"].values)
+        remaining_terms = terms_map.reindex(available_tickers, fill_value=12.0).copy()
+
+        results = []
+        w_active_actual = None
+        total_rebalances = 0
+        weight_history = []
+
+        log.info(
+            f"Starting amount-based backtest for {n_months} months " f"(budget={budget:,.0f}, model={model_type})..."
+        )
+
+        for offset in range(n_months, 0, -1):
+            target_date = monthly_returns.index[-offset]
+            log.info(f"Amount backtest month: {target_date.strftime('%Y-%m')}")
+
+            active_tickers_month = [t for t in available_tickers if remaining_terms[t] > 0]
+            n_active = len(active_tickers_month)
+
+            if n_active == 0:
+                log.info("All loans expired at %s.", target_date.strftime("%Y-%m"))
+                results.append(
+                    {
+                        "Date": target_date,
+                        "Active_Return": 0.0,
+                        "Active_EL": 0.0,
+                        "Active_Credit_Income": 0.0,
+                        "Active_Net": 0.0,
+                        "Passive_Return": 0.0,
+                        "Passive_EL": 0.0,
+                        "Passive_Credit_Income": 0.0,
+                        "Passive_Net": 0.0,
+                        "Turnover": 0.0,
+                        "TC": 0.0,
+                        "Rebalanced": False,
+                        "Active_Loans": 0,
+                    }
+                )
+                weight_record = {"date": target_date, "rebalanced": False}
+                for ticker in available_tickers:
+                    weight_record[ticker] = 0.0
+                weight_history.append(weight_record)
+                continue
+
+            self.predict_dd(horizon=1, training_offset=offset, model_type=model_type)
+
+            active_apps = loan_applications[loan_applications["ticker"].isin(active_tickers_month)].copy()
+            active_apps["term"] = active_apps["ticker"].map(remaining_terms)
+
+            self.optimize_portfolio_with_amounts(
+                loan_applications=active_apps,
+                budget=budget,
+                lambda_return=lambda_return,
+                lambda_vol=lambda_vol,
+                lambda_el=lambda_el,
+                max_sector_share=max_sector_share,
+                sector_map=sector_map,
+                cutoff_date=target_date,
+                strategy=strategy,
+                cvar_alpha=cvar_alpha,
+            )
+
+            alloc = self.d["loan_allocations"].set_index("ticker")
+            w_target = alloc["weight"].reindex(available_tickers, fill_value=0.0)
+            w_target = w_target / (w_target.sum() + self.EPSILON)
+
+            if w_active_actual is None:
+                w_active_actual = w_target.copy()
+                turnover = w_target.abs().sum()
+                rebalanced = True
+                total_rebalances += 1
+            else:
+                rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
+                w_drifted = w_active_actual * (1 + rets)
+                total_val = w_drifted.sum()
+                w_drifted = w_drifted / total_val if total_val > 0 else w_target.copy()
+
+                max_drift = (w_drifted - w_target).abs().max()
+                if max_drift > rebalance_threshold:
+                    turnover = (w_target - w_drifted).abs().sum()
+                    w_active_actual = w_target.copy()
+                    rebalanced = True
+                    total_rebalances += 1
+                else:
+                    turnover = 0.0
+                    w_active_actual = w_drifted
+                    rebalanced = False
+
+            tc = transaction_cost * turnover
+
+            pds_t = monthly_pds.loc[target_date, available_tickers].fillna(0)
+
+            active_return = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
+            active_el = np.sum(w_active_actual * pds_t * lgds_map.reindex(available_tickers, fill_value=0.4))
+            active_credit_income = np.sum(
+                w_active_actual.reindex(active_tickers_month, fill_value=0)
+                * rates.reindex(active_tickers_month, fill_value=0)
+                / self.MONTHS_PER_YEAR
+            )
+
+            w_passive = pd.Series(0.0, index=available_tickers)
+            w_passive[active_tickers_month] = 1.0 / n_active
+            passive_return = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
+            passive_el = np.sum(w_passive * pds_t * lgds_map.reindex(available_tickers, fill_value=0.4))
+            passive_credit_income = np.sum(
+                w_passive.reindex(active_tickers_month, fill_value=0)
+                * rates.reindex(active_tickers_month, fill_value=0)
+                / self.MONTHS_PER_YEAR
+            )
+
+            weight_record = {"date": target_date, "rebalanced": rebalanced}
+            for ticker in available_tickers:
+                weight_record[ticker] = w_active_actual.get(ticker, 0.0)
+            weight_history.append(weight_record)
+
+            results.append(
+                {
+                    "Date": target_date,
+                    "Active_Return": active_return,
+                    "Active_EL": active_el,
+                    "Active_Credit_Income": active_credit_income,
+                    "Active_Net": active_return + active_credit_income - active_el,
+                    "Passive_Return": passive_return,
+                    "Passive_EL": passive_el,
+                    "Passive_Credit_Income": passive_credit_income,
+                    "Passive_Net": passive_return + passive_credit_income - passive_el,
+                    "Turnover": turnover,
+                    "TC": tc,
+                    "Rebalanced": rebalanced,
+                    "Active_Loans": n_active,
+                }
+            )
+
+            remaining_terms -= 1
+
+        backtest_df = pd.DataFrame(results).set_index("Date")
+
+        summary = pd.DataFrame(
+            {
+                "Total Market Return (%)": [
+                    ((1 + backtest_df["Active_Return"]).prod() - 1) * 100,
+                    ((1 + backtest_df["Passive_Return"]).prod() - 1) * 100,
+                ],
+                "Avg Credit Income (%)": [
+                    backtest_df["Active_Credit_Income"].mean() * 100,
+                    backtest_df["Passive_Credit_Income"].mean() * 100,
+                ],
+                "Avg Realized EL (%)": [
+                    backtest_df["Active_EL"].mean() * 100,
+                    backtest_df["Passive_EL"].mean() * 100,
+                ],
+                "Avg Net Income (%)": [
+                    backtest_df["Active_Net"].mean() * 100,
+                    backtest_df["Passive_Net"].mean() * 100,
+                ],
+                "Realized Vol (%)": [
+                    backtest_df["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+                    backtest_df["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100,
+                ],
+                "Total TC (%)": [backtest_df["TC"].sum() * 100, 0.0],
+                "Rebalances": [total_rebalances, 0],
+            },
+            index=["Active (Optimized)", "Passive (Equal)"],
+        )
+
+        self.d["amount_backtest"] = backtest_df
+        self.d["amount_backtest_summary"] = summary
+        self.d["amount_weight_history"] = pd.DataFrame(weight_history).set_index("date")
+
+        log.log_dataframe(summary.reset_index(), title="Amount-Based Strategy Comparison")
+        log.info(f"Amount-based backtest completed. Rebalances: {total_rebalances}/{n_months}")
+
+        return self
+
+    def compare_amount_strategies(
+        self,
+        loan_applications: pd.DataFrame,
+        budget: float,
+        strategies: List[str] = None,
+        n_months: int = 12,
+        lambda_return: float = 0.5,
+        lambda_vol: float = 0.25,
+        lambda_el: float = 0.25,
+        model_type: str = "var",
+        max_sector_share: float = 0.3,
+        sector_map: Dict[str, str] = None,
+        rebalance_threshold: float = 0.05,
+        transaction_cost: float = 0.001,
+        cvar_alpha: float = 0.95,
+    ) -> "Portfolio":
+        """Runs amount-based backtest for multiple strategies and builds comparison.
+
+        Calls ``backtest_portfolio_with_amounts`` for each strategy, collects
+        per-strategy backtest DataFrames, and produces a combined comparison
+        table analogous to ``multi_strategy_comparison`` in the weight-based
+        pipeline.
+
+        Args:
+            loan_applications: DataFrame with columns [ticker, amount, rate, lgd, term].
+            budget: Total lending budget.
+            strategies: List of strategy names (default: all three).
+            n_months: Backtest window length in months.
+            lambda_return: Weight for return component.
+            lambda_vol: Weight for risk measure component.
+            lambda_el: Weight for expected loss component.
+            model_type: Macro model for DD forecasts.
+            max_sector_share: Maximum share of budget per sector.
+            sector_map: Dict mapping ticker -> sector.
+            rebalance_threshold: Max weight drift before rebalancing.
+            transaction_cost: One-way proportional cost per unit of turnover.
+            cvar_alpha: CVaR confidence level (only for strategy='cvar').
+
+        Returns:
+            Portfolio: Self with ``self.d['all_amount_backtests']`` and
+            ``self.d['amount_multi_strategy_comparison']`` populated.
+        """
+        if strategies is None:
+            strategies = ["mean_el", "cvar", "risk_parity"]
+
+        all_backtests: Dict[str, pd.DataFrame] = {}
+        comparison_rows: List[dict] = []
+
+        for strat in strategies:
+            log.info("=" * 60)
+            log.info("Amount-based backtest: strategy=%s", strat)
+            log.info("=" * 60)
+
+            self.backtest_portfolio_with_amounts(
+                loan_applications=loan_applications,
+                budget=budget,
+                n_months=n_months,
+                lambda_return=lambda_return,
+                lambda_vol=lambda_vol,
+                lambda_el=lambda_el,
+                model_type=model_type,
+                max_sector_share=max_sector_share,
+                sector_map=sector_map,
+                rebalance_threshold=rebalance_threshold,
+                transaction_cost=transaction_cost,
+                strategy=strat,
+                cvar_alpha=cvar_alpha,
+            )
+            bt = self.d["amount_backtest"].copy()
+            all_backtests[strat] = bt
+
+            net_vol = bt["Active_Net"].std() * np.sqrt(self.MONTHS_PER_YEAR)
+            comparison_rows.append(
+                {
+                    "Strategy": strat,
+                    "Total Market Return (%)": round(((1 + bt["Active_Return"]).prod() - 1) * 100, 4),
+                    "Avg Credit Income (%)": round(bt["Active_Credit_Income"].mean() * 100, 4),
+                    "Avg Realized EL (%)": round(bt["Active_EL"].mean() * 100, 6),
+                    "Avg Net Income (%)": round(bt["Active_Net"].mean() * 100, 4),
+                    "Realized Vol (%)": round(bt["Active_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100, 4),
+                    "Total TC (%)": round(bt["TC"].sum() * 100, 4),
+                    "Rebalances": int(bt["Rebalanced"].sum()),
+                    "RAROC (%)": round(bt["Active_Net"].mean() / (net_vol + self.EPSILON) * 100, 4),
+                }
+            )
+
+        last_bt = all_backtests[strategies[-1]]
+        passive_net_vol = last_bt["Passive_Net"].std() * np.sqrt(self.MONTHS_PER_YEAR)
+        comparison_rows.append(
+            {
+                "Strategy": "passive (equal)",
+                "Total Market Return (%)": round(((1 + last_bt["Passive_Return"]).prod() - 1) * 100, 4),
+                "Avg Credit Income (%)": round(last_bt["Passive_Credit_Income"].mean() * 100, 4),
+                "Avg Realized EL (%)": round(last_bt["Passive_EL"].mean() * 100, 6),
+                "Avg Net Income (%)": round(last_bt["Passive_Net"].mean() * 100, 4),
+                "Realized Vol (%)": round(last_bt["Passive_Return"].std() * np.sqrt(self.MONTHS_PER_YEAR) * 100, 4),
+                "Total TC (%)": 0.0,
+                "Rebalances": 0,
+                "RAROC (%)": round(last_bt["Passive_Net"].mean() / (passive_net_vol + self.EPSILON) * 100, 4),
+            }
+        )
+
+        multi_comparison = pd.DataFrame(comparison_rows).set_index("Strategy")
+        self.d["all_amount_backtests"] = all_backtests
+        self.d["amount_multi_strategy_comparison"] = multi_comparison
+
+        log.log_dataframe(multi_comparison.reset_index(), title="Amount-Based Multi-Strategy Comparison")
+        return self
+
+    def plot_amount_backtest(self, tail: int = 12, verbose: bool = False) -> "Portfolio":
+        """Plots multi-strategy comparison for amount-based backtests.
+
+        Args:
+            tail: Number of last periods to show (0 = all).
+            verbose: Whether to display the plot interactively.
+
+        Returns:
+            Portfolio: Self for method chaining.
+        """
+        if "all_amount_backtests" not in self.d:
+            log.error("No amount-based multi-strategy results. Run compare_amount_strategies first.")
+            return self
+
+        plots.plot_amount_strategy_comparison(
+            all_backtests=self.d["all_amount_backtests"],
+            comparison_df=self.d["amount_multi_strategy_comparison"],
+            tail=tail,
+            verbose=verbose,
+        )
+        return self
+
     def log_completion(self):
         """
         Logs the completion of the analysis.
