@@ -357,9 +357,54 @@
 	\end{equation}
 	где $d_1 = \frac{\ln(V/L) + (r + 0.5\sigma_V^2)T}{\sigma_V\sqrt{T}}$, $d_2 = d_1 - \sigma_V\sqrt{T}$.
 
-	Для решения данной системы в программном комплексе реализован метод \textbf{Ньютона-Рафсона}
-	(модуль \texttt{scipy.optimize.root}), обеспечивающий сходимость вектора параметров
-	$\theta = [V, \sigma_V]$. После нахождения параметров рассчитывается расстояние до дефолта ($DD$):
+	Для решения данной системы в программном комплексе реализован численный метод
+	нелинейных наименьших квадратов \emph{Trust Region Reflective}~\cite{conn2000trust}
+	(модуль \texttt{scipy.optimize.least\_squares}). Подход состоит в эквивалентной
+	переформулировке задачи: вместо поиска корня системы~(\ref{merton_system})
+	минимизируется сумма квадратов её невязок:
+	\begin{equation}
+		\label{merton_lsq}
+		\min_{V > 0,\ \sigma_V > 0}
+		\;\frac{1}{2}\Bigl(f_1^2(V, \sigma_V) + f_2^2(V, \sigma_V)\Bigr),
+	\end{equation}
+	где $f_1, f_2$~--- безразмерные невязки уравнений~(\ref{merton_system}),
+	нормированные на величину собственного капитала $E$:
+	\[
+		f_1 = \frac{V N(d_1) - L e^{-rT} N(d_2) - E}{E},\qquad
+		f_2 = \frac{N(d_1) \sigma_V V - \sigma_E E}{E}.
+	\]
+	Нормирование на $E$ необходимо для численной устойчивости: абсолютные невязки
+	имеют размерность капитализации (порядка $10^{10}$\,---\,$10^{11}$\,руб.),
+	что приводит к преждевременной остановке солвера по относительным критериям
+	сходимости при истинной невязке порядка $10^{6}$\,руб. После обезразмеривания
+	обе невязки имеют порядок $O(1)$, и метод сходится до уровня машинной точности.
+	Положительность переменных $(V, \sigma_V)$ обеспечивается явными граничными
+	ограничениями, передаваемыми в \texttt{least\_squares} через параметр
+	\texttt{bounds}.
+
+	Для ускорения сходимости и снижения числа вызовов численных оценок производных
+	солверу передаётся \emph{аналитический якобиан} системы~(\ref{merton_system}).
+	С использованием тождества Блэка~--~Шоулза $V \varphi(d_1) = L e^{-rT} \varphi(d_2)$,
+	где $\varphi(\cdot)$~--- плотность стандартного нормального распределения,
+	частные производные принимают компактный вид:
+	\begin{equation}
+		\label{merton_jacobian}
+		J(V, \sigma_V) = \frac{1}{E}
+		\begin{pmatrix}
+			N(d_1) & V \varphi(d_1) \sqrt{T} \\[4pt]
+			N(d_1) \sigma_V + \dfrac{\varphi(d_1)}{\sqrt{T}}
+			& N(d_1) V - \varphi(d_1) V\, d_2
+		\end{pmatrix}.
+	\end{equation}
+	Передача замкнутой формы~(\ref{merton_jacobian}) в солвер вместо численной
+	оценки конечными разностями сокращает время решения примерно вдвое на
+	панели из $\sim$23\,тыс.~наблюдений и одновременно повышает точность
+	градиентной информации.
+
+	В качестве начального приближения используются эвристики Moody's KMV:
+	$V_0 = E + L e^{-rT}$ (капитал плюс приведённая стоимость долга),
+	$\sigma_{V,0} = \sigma_E E / (E + L)$ (соотношение Ito при $N(d_1) \approx 1$).
+	После сходимости рассчитывается расстояние до дефолта ($DD$):
 	\begin{equation}
 		DD = \frac{\ln(V/L) + (r - 0.5\sigma_V^2)T}{\sigma_V\sqrt{T}}
 	\end{equation}
@@ -1701,6 +1746,9 @@ Start Date ..... End Date
 
 		\bibitem{statsmodels}
 		Seabold, S., \& Perktold, J. (2010). statsmodels: Econometric and Statistical Modeling with Python. \textit{Proceedings of the 9th Python in Science Conference}, 92–96.
+
+		\bibitem{conn2000trust}
+		Conn, A.~R., Gould, N.~I.~M., \& Toint, P.~L. (2000). \textit{Trust-Region Methods}. MPS-SIAM Series on Optimization. SIAM, Philadelphia, PA. ISBN: 978-0-89871-460-9.
 
 	\end{thebibliography}
 
