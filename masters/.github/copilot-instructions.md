@@ -46,3 +46,18 @@ Follow the **Conventional Commits 1.0.0** specification:
 - First convert the PDF to Markdown with the `markitdown` MCP tool, then work only from the extracted content.
 - If a PDF path is available, use `#markitdown` explicitly before answering.
 - If the PDF cannot be read through `markitdown`, clearly say that the tool failed and ask for another file or path.
+
+## 6. LaTeX Coding Standards
+- **Line length**: Maximum 100 characters per source line. Wrap long text at natural phrase boundaries.
+- **Display math**: Use `\[...\]` (LaTeX2e). NEVER use `$$...$$` (plain TeX).
+- **Indentation**: 4 spaces inside all environments (`\begin{...}...\end{...}`), including `align*`, `pmatrix`, `document`.
+- **Operators**: Define custom math operators with `\DeclareMathOperator` in the preamble instead of repeating `\mathrm{...}` inline.
+- **Paragraph spacing**: Prefer global `\setlength{\parindent}{0pt}` + `\setlength{\parskip}{...}` instead of scattering `\noindent` manually.
+- **Percent sign**: Use `\,\%` (thin space before `\%`) in both text and math mode for typographic correctness.
+- **Non-breaking spaces**: Use `~` before dashes (`~---`), references, units, and short words to prevent bad line breaks.
+- **Decimal comma**: Use `{,}` for Russian-locale decimal separators inside math mode (e.g., `0{,}50`).
+- **Packages**: Only include packages actually used in the document. Remove unused imports.
+- **Semantic markup**: Use `\emph{}` for emphasis, `\textbf{}` for structural headers. Do not use font commands (`\bf`, `\it`).
+- **Structure style** (for homework/exam solutions): Use `\textbf{Условие}` / `\textbf{Решение}` / `\textbf{Ответ}` as section-like headers without `\section{}`. Separate sections with `\bigskip`.
+- **Formula layout**: Break long formulas across lines inside `\[...\]` using alignment (`=` on separate lines). Inside `align*`, break each equation row into readable parts with `&=` alignment.
+- **Comments**: All LaTeX comments must be in English (same as code comments rule).
