@@ -323,9 +323,26 @@ def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, 
         figsize: Figure size.
     """
     grouped = portfolio_df.groupby("ticker")
+    summary_rows = []
 
     for ticker, group in grouped:
         group = group.sort_values("date").dropna(subset=["capitalization", "debt"])
+
+        summary_rows.append(
+            {
+                "ticker": ticker,
+                "cap_mean": group["capitalization"].mean(),
+                "cap_min": group["capitalization"].min(),
+                "cap_max": group["capitalization"].max(),
+                "debt_mean": group["debt"].mean(),
+                "debt_min": group["debt"].min(),
+                "debt_max": group["debt"].max(),
+                "cap_debt_ratio": (
+                    group["capitalization"].mean() / group["debt"].mean() if group["debt"].mean() != 0 else np.inf
+                ),
+                "rows": len(group),
+            }
+        )
 
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
 
@@ -346,6 +363,12 @@ def plot_debt_capitalization(portfolio_df: pd.DataFrame, verbose: bool = False, 
         _finalize_plot(save_path, verbose, dpi=100)
 
     log.info("Capitalization-debt graphs saved: %s", cfg.GRAPHS_DIR)
+
+    summary_df = pd.DataFrame(summary_rows)
+    for col in ["cap_mean", "cap_min", "cap_max", "debt_mean", "debt_min", "debt_max"]:
+        summary_df[col] = summary_df[col].apply(lambda x: f"{x:,.0f}")
+    summary_df["cap_debt_ratio"] = summary_df["cap_debt_ratio"].apply(lambda x: f"{x:.2f}" if x != np.inf else "inf")
+    log.log_dataframe(summary_df, title="Debt & Capitalization Summary")
 
 
 def plot_ticker_dashboards_grid(

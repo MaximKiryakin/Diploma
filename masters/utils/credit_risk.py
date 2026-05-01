@@ -1,7 +1,7 @@
 """Credit risk forecasting functions for the Portfolio class.
 
 Covers macro factor prediction, PD/DD forecasting, walk-forward backtests,
-Granger/OLS macro significance analysis, and model comparison.
+OLS macro significance analysis, and model comparison.
 
 All public functions accept a ``Portfolio`` instance as the first argument and
 mutate ``self.d`` in place, returning ``self`` for method chaining.
@@ -338,30 +338,24 @@ def backtest_dd_fn(
 # ---------------------------------------------------------------------------
 
 
-def plot_macro_forecast_fn(
+def forecast_macro_fn(
     self: "Portfolio",
     horizon: int = 1,
     training_offset: int = 0,
     models: Union[str, list] = "var",
-    tail: int = 12,
     target_col: str = "DD",
-    verbose: bool = False,
-    figsize: tuple = (12, 14),
 ) -> "Portfolio":
-    """Plots historical and forecasted macro and portfolio DD/PD.
+    """Computes macro and DD/PD forecasts, stores results in self.d['macro_forecast_data'].
 
     Args:
         self: Portfolio instance.
         horizon: Forecasting horizon (negative = walk-forward backtest).
         training_offset: Offset for backtesting.
         models: Model type(s) to compare.
-        tail: History months to show in plots.
         target_col: 'DD' or 'PD'.
-        verbose: Whether to display the plot.
-        figsize: Figure size.
 
     Returns:
-        Portfolio: self.
+        Portfolio: self with self.d['macro_forecast_data'] populated.
     """
     if isinstance(models, str):
         models = [models]
@@ -369,9 +363,9 @@ def plot_macro_forecast_fn(
     is_backtest = horizon < 0
     if is_backtest:
         n_months = abs(horizon)
-        log.info("Visualizing Expanding Window backtest for last %d months", n_months)
+        log.info("Computing Expanding Window backtest for last %d months", n_months)
     else:
-        log.info("Visualizing Multi-step forecast for %d months", horizon)
+        log.info("Computing Multi-step forecast for %d months", horizon)
 
     port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
     macro_df = (
@@ -412,100 +406,113 @@ def plot_macro_forecast_fn(
             fc_df[target_col] = trajectory
             forecast_dfs[m_type] = fc_df
 
+    self.d["macro_forecast_data"] = {"macro_df": macro_df, "forecast_dfs": forecast_dfs}
+    log.info("Macro forecast data computed and stored.")
+    return self
+
+
+def plot_macro_forecast_fn(
+    self: "Portfolio",
+    horizon: int = 1,
+    training_offset: int = 0,
+    models: Union[str, list] = "var",
+    tail: int = 12,
+    target_col: str = "DD",
+    verbose: bool = False,
+    figsize: tuple = (12, 14),
+) -> "Portfolio":
+    """Plots historical and forecasted macro and portfolio DD/PD.
+
+    If self.d['macro_forecast_data'] is not populated, computes forecasts first.
+
+    Args:
+        self: Portfolio instance.
+        horizon: Forecasting horizon (negative = walk-forward backtest).
+        training_offset: Offset for backtesting.
+        models: Model type(s) to compare.
+        tail: History months to show in plots.
+        target_col: 'DD' or 'PD'.
+        verbose: Whether to display the plot.
+        figsize: Figure size.
+
+    Returns:
+        Portfolio: self.
+    """
+    if "macro_forecast_data" not in self.d:
+        forecast_macro_fn(self, horizon=horizon, training_offset=training_offset, models=models, target_col=target_col)
+
+    macro_df = self.d["macro_forecast_data"]["macro_df"]
+    forecast_dfs = self.d["macro_forecast_data"]["forecast_dfs"]
+
     plots.plot_macro_forecast(macro_df, forecast_dfs, tail=tail, figsize=figsize, verbose=verbose)
     return self
 
 
 # ---------------------------------------------------------------------------
-# OLS + Granger significance analysis
+# OLS macro significance analysis
 # ---------------------------------------------------------------------------
 
 
 def analyze_macro_dd_significance_fn(
     self: "Portfolio",
-    max_lag: int = 3,
     verbose: bool = True,
 ) -> "Portfolio":
     """Analyzes statistical significance of macro variables on DD.
 
-    Runs pooled OLS: DD ~ inflation + interest_rate + unemployment + RUBUSD
-    and Granger causality tests for each macro variable.
+    Runs Panel OLS with entity Fixed Effects and clustered standard errors.
 
     Args:
         self: Portfolio instance.
-        max_lag: Maximum number of lags for Granger causality tests.
         verbose: If True, prints detailed results.
 
     Returns:
         Portfolio: self with results in self.d['macro_significance'].
     """
-    from statsmodels.tsa.stattools import grangercausalitytests
+    from linearmodels.panel import PanelOLS
 
     panel = self.d["portfolio"][["date", "ticker", "DD"] + cfg.MACRO_COLS].dropna().copy()
-    panel["month"] = panel["date"].dt.to_period("M")
+    panel["month"] = panel["date"].dt.to_period("M").dt.to_timestamp()
     monthly = (
         panel.groupby(["ticker", "month"])
         .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in cfg.MACRO_COLS})
         .reset_index()
     )
 
-    y = monthly["DD"]
-    X = sm.add_constant(monthly[cfg.MACRO_COLS])
-    ols_model = sm.OLS(y, X).fit()
+    monthly = monthly.set_index(["ticker", "month"])
+    panel_model = PanelOLS(
+        monthly["DD"],
+        sm.add_constant(monthly[cfg.MACRO_COLS]),
+        entity_effects=True,
+    ).fit(cov_type="clustered", cluster_entity=True)
 
     ols_summary = {
-        "r_squared": ols_model.rsquared,
-        "adj_r_squared": ols_model.rsquared_adj,
-        "f_statistic": ols_model.fvalue,
-        "f_pvalue": ols_model.f_pvalue,
-        "n_obs": int(ols_model.nobs),
+        "r_squared": panel_model.rsquared,
+        "r_squared_within": panel_model.rsquared_within,
+        "f_statistic": panel_model.f_statistic.stat,
+        "f_pvalue": panel_model.f_statistic.pval,
+        "n_obs": int(panel_model.nobs),
+        "n_entities": int(panel_model.entity_info.total),
         "coefficients": {},
     }
     for var in ["const"] + cfg.MACRO_COLS:
         ols_summary["coefficients"][var] = {
-            "coef": ols_model.params[var],
-            "std_err": ols_model.bse[var],
-            "t_stat": ols_model.tvalues[var],
-            "p_value": ols_model.pvalues[var],
-            "significant": ols_model.pvalues[var] < 0.05,
-        }
-
-    agg_monthly = (
-        panel.groupby("month")
-        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in cfg.MACRO_COLS})
-        .reset_index()
-        .sort_values("month")
-    )
-
-    granger_results = {}
-    for col in cfg.MACRO_COLS:
-        series = agg_monthly[["DD", col]].dropna()
-        if len(series) < max_lag + 5:
-            granger_results[col] = {"error": "insufficient data"}
-            continue
-        test_result = grangercausalitytests(series.values, maxlag=max_lag, verbose=False)
-        best_lag = min(test_result, key=lambda x: test_result[x][0]["ssr_ftest"][1])
-        f_stat = test_result[best_lag][0]["ssr_ftest"][0]
-        p_val = test_result[best_lag][0]["ssr_ftest"][1]
-        granger_results[col] = {
-            "best_lag": best_lag,
-            "f_statistic": f_stat,
-            "p_value": p_val,
-            "significant": p_val < 0.05,
+            "coef": panel_model.params[var],
+            "std_err": panel_model.std_errors[var],
+            "t_stat": panel_model.tstats[var],
+            "p_value": panel_model.pvalues[var],
+            "significant": panel_model.pvalues[var] < 0.05,
         }
 
     self.d["macro_significance"] = {
         "ols": ols_summary,
-        "granger": granger_results,
-        "ols_model": ols_model,
+        "panel_model": panel_model,
     }
 
     if verbose:
         log.info("=" * 80)
-        log.info("POOLED OLS REGRESSION: DD ~ macro variables")
+        log.info("PANEL OLS (Entity FE, Clustered SE): DD ~ macro variables")
         log.info("=" * 80)
-        for line in str(ols_model.summary().tables[0]).split("\n"):
-            log.info(line)
+        log.info(str(panel_model.summary.tables[0]))
 
         coef_data = []
         for var in ["const"] + cfg.MACRO_COLS:
@@ -516,32 +523,13 @@ def analyze_macro_dd_significance_fn(
             )
         coef_df = pd.DataFrame(coef_data, columns=["Variable", "Coef", "Std Err", "t-stat", "p-value", "Sig"])
         log.info("\n" + coef_df.to_string(index=False))
-        log.info("R-squared: %.4f, Adj R-squared: %.4f", ols_summary["r_squared"], ols_summary["adj_r_squared"])
+        log.info(
+            "R-squared: %.4f, R-squared (within): %.4f",
+            ols_summary["r_squared"],
+            ols_summary["r_squared_within"],
+        )
         log.info("F-statistic: %.2f, p-value: %.2e", ols_summary["f_statistic"], ols_summary["f_pvalue"])
-        log.info("N observations: %d", ols_summary["n_obs"])
-
-        log.info("=" * 80)
-        log.info("GRANGER CAUSALITY TESTS (max_lag=%d): macro -> DD", max_lag)
-        log.info("=" * 80)
-        granger_data = []
-        for col in cfg.MACRO_COLS:
-            g = granger_results[col]
-            if "error" in g:
-                granger_data.append([col, "-", "-", "-", g["error"]])
-            else:
-                sig = (
-                    "***"
-                    if g["p_value"] < 0.001
-                    else "**"
-                    if g["p_value"] < 0.01
-                    else "*"
-                    if g["p_value"] < 0.05
-                    else ""
-                )
-                granger_data.append([col, g["best_lag"], f"{g['f_statistic']:.2f}", f"{g['p_value']:.4f}", sig])
-        granger_df = pd.DataFrame(granger_data, columns=["Variable", "Best Lag", "F-stat", "p-value", "Sig"])
-        log.info("\n" + granger_df.to_string(index=False))
-        log.info("Significance: *** p<0.001, ** p<0.01, * p<0.05")
+        log.info("N observations: %d, N entities: %d", ols_summary["n_obs"], ols_summary["n_entities"])
 
     log.info("Macro-DD significance analysis completed.")
     return self

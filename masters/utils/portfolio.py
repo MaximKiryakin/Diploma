@@ -288,6 +288,32 @@ class Portfolio:
         plots.plot_portfolio_allocation(self.d["optimized_weights"], figsize=figsize, verbose=verbose)
         return self
 
+    def forecast_macro(
+        self,
+        horizon: int = 1,
+        training_offset: int = 0,
+        models: Union[str, list] = "var",
+        target_col: str = "DD",
+    ) -> "Portfolio":
+        """Computes macro and DD/PD forecasts, stores in self.d['macro_forecast_data'].
+
+        Args:
+            horizon: Forecasting horizon (negative = walk-forward backtest).
+            training_offset: Offset for backtesting.
+            models: Model type(s) to compare.
+            target_col: 'DD' or 'PD'.
+
+        Returns:
+            Portfolio: self.
+        """
+        return credit_risk.forecast_macro_fn(
+            self,
+            horizon=horizon,
+            training_offset=training_offset,
+            models=models,
+            target_col=target_col,
+        )
+
     def plot_macro_forecast(
         self,
         horizon: int = 1,
@@ -310,19 +336,18 @@ class Portfolio:
             figsize=figsize,
         )
 
-    def analyze_macro_dd_significance(self, max_lag: int = 3, verbose: bool = True) -> "Portfolio":
+    def analyze_macro_dd_significance(self, verbose: bool = True) -> "Portfolio":
         """Analyzes the statistical significance of macro variables on DD.
 
         Delegates to credit_risk.analyze_macro_dd_significance_fn.
 
         Args:
-            max_lag: Maximum number of lags for Granger causality tests.
             verbose: If True, prints detailed results.
 
         Returns:
             Portfolio: Self with results in self.d['macro_significance'].
         """
-        return credit_risk.analyze_macro_dd_significance_fn(self, max_lag=max_lag, verbose=verbose)
+        return credit_risk.analyze_macro_dd_significance_fn(self, verbose=verbose)
 
     def compare_macro_models(
         self,

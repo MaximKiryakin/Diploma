@@ -92,5 +92,5 @@ MACRO_UNEMPLOYMENT_PATH: str = "data/macro/unemployment.xlsx"
 GRAPHS_DIR: Path = Path("logs/graphs")
 
 # Default save path for the macroeconomic factor significance summary chart
-# (bar chart of OLS/Granger p-values across tickers and macro variables).
+# (bar chart of OLS p-values across tickers and macro variables).
 MACRO_SIGNIFICANCE_PLOT_PATH: str = "logs/graphs/macro_significance_summary.png"

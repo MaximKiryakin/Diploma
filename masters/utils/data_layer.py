@@ -448,6 +448,10 @@ def add_dynamic_features_fn(self: "Portfolio") -> "Portfolio":
 
     df["volatility"] = df.groupby("ticker")["volatility"].transform(lambda x: x.bfill())
     global_avg_vol = df["volatility"].mean()
+
+    if np.isnan(global_avg_vol):
+        log.warning("Global average volatility is NaN, using default constant: %.2f", cfg.DEFAULT_VOLATILITY)
+
     df["volatility"] = df["volatility"].fillna(global_avg_vol).fillna(cfg.DEFAULT_VOLATILITY)
 
     df = df.drop(columns=["log_return"])
@@ -487,20 +491,33 @@ def _solve_merton_vectorized_fn(self: "Portfolio", T: float = 1) -> "Portfolio":
 
     initial_guess = np.vstack([E + D, sigma_E]).T
     log.info(f"Starting Merton model calculations for {len(initial_guess)} rows...")
-    results = np.array(
-        [
-            root(
-                equations,
-                guess,
-                args=(E[i], D[i], self.d["portfolio"]["interest_rate"][i], sigma_E[i], T),
-            ).x
-            for i, guess in enumerate(tqdm(initial_guess, desc="Solving Merton equations"))
-        ]
-    )
 
+    r_values = self.d["portfolio"]["interest_rate"].values.astype(float)
+    solutions = [
+        root(
+            equations,
+            guess,
+            args=(E[i], D[i], r_values[i], sigma_E[i], T),
+        )
+        for i, guess in enumerate(tqdm(initial_guess, desc="Solving Merton equations"))
+    ]
+
+    failed = sum(1 for sol in solutions if not sol.success)
+    if failed > 0:
+        log.warning("Merton solver did not converge for %d / %d rows.", failed, len(solutions))
+
+    results = np.array([sol.x for sol in solutions])
     self.d["portfolio"]["V"] = np.where(results[:, 0] <= 0, cfg.EPSILON, results[:, 0])
-    self.d["portfolio"]["sigma_V"] = results[:, 1]
+    raw_sigma_V = results[:, 1]
+
+    negative_sigma = np.sum(raw_sigma_V < 0)
+    if negative_sigma > 0:
+        log.warning("sigma_V < 0 for %d rows; taking abs().", negative_sigma)
+
+    self.d["portfolio"]["sigma_V"] = np.abs(raw_sigma_V)
+
     log.info("Capital cost and capital volatility calculated.")
+
     return self
 
 
@@ -516,14 +533,18 @@ def _merton_pd_fn(self: "Portfolio", T: float = 1) -> "Portfolio":
     """
     V = self.d["portfolio"]["V"].values.astype(float)
     D = self.d["portfolio"]["debt"].values.astype(float)
-    sigma_V = self.d["portfolio"]["sigma_V"]
+    sigma_V = self.d["portfolio"]["sigma_V"].values.astype(float)
+    r = self.d["portfolio"]["interest_rate"].values.astype(float)
 
-    d2 = (
-        np.log(V / np.where(D != 0, D, cfg.EPSILON)) + (self.d["portfolio"]["interest_rate"] - 0.5 * sigma_V**2) * T
-    ) / (sigma_V * np.sqrt(T))
+    safe_D = np.where(D != 0, D, cfg.EPSILON)
+    safe_sigma_V = np.where(sigma_V != 0, sigma_V, cfg.EPSILON)
+
+    d2 = (np.log(V / safe_D) + (r - 0.5 * sigma_V**2) * T) / (safe_sigma_V * np.sqrt(T))
     self.d["portfolio"]["PD"] = norm.cdf(-d2)
     self.d["portfolio"]["DD"] = d2
+
     log.info("Merton's probabilities of default and distance to default calculated.")
+
     return self
 
 
