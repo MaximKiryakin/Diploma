@@ -155,7 +155,7 @@ class Portfolio:
         Returns:
             Portfolio: self with 'V' and 'sigma_V' in self.d['portfolio'].
         """
-        return data_layer._solve_merton_vectorized_fn(self, T=T)
+        return data_layer._solve_merton_rowwise_fn(self, T=T)
 
     def _merton_pd(self, T: float = 1) -> "Portfolio":
         """Calculates PD and DD from solved Merton V and sigma_V.
@@ -168,13 +168,17 @@ class Portfolio:
         """
         return data_layer._merton_pd_fn(self, T=T)
 
-    def add_merton_pd(self) -> "Portfolio":
+    def add_merton_pd(self, T: float = 1.0) -> "Portfolio":
         """Computes PD and DD via Merton model and adds them to the portfolio.
 
+        Args:
+            T: Time horizon for the default event in years. Defaults to 1.0.
+
         Returns:
-            Portfolio: self with 'PD' and 'DD' added, V/sigma_V removed.
+            Portfolio: self with 'PD', 'DD', 'V', 'sigma_V' and
+            'merton_converged' columns added.
         """
-        return data_layer.add_merton_pd_fn(self)
+        return data_layer.add_merton_pd_fn(self, T=T)
 
     def add_dynamic_features(self) -> "Portfolio":
         """Adds EWMA annualized volatility to self.d['portfolio'].
