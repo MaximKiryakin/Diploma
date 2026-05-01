@@ -9,6 +9,7 @@ mutate ``self.d`` in place, returning ``self`` for method chaining.
 
 from __future__ import annotations
 
+import time
 from typing import List, TYPE_CHECKING, Union
 
 import numpy as np
@@ -57,6 +58,15 @@ def predict_macro_factors_fn(
         training_offset = abs(horizon)
         horizon = abs(horizon)
 
+    # Instrumentation: count macro-model fits during a forecast_macro_fn run.
+    # The counter dict is created/cleared by forecast_macro_fn; outside of
+    # that scope this is a no-op.
+    fit_counter = self.d.get("_macro_fit_counter")
+    if fit_counter is not None:
+        key = model_type.lower()
+        fit_counter[key] = fit_counter.get(key, 0) + 1
+    fit_t0 = time.perf_counter()
+
     macro_df = (
         self.d["portfolio"][["date"] + cfg.MACRO_COLS]
         .drop_duplicates("date")
@@ -71,53 +81,126 @@ def predict_macro_factors_fn(
 
     future_dates = pd.date_range(start=macro_df.index[-1] + pd.offsets.MonthEnd(1), periods=horizon, freq="ME")
 
+    result = pd.DataFrame()
     if model_type.lower() == "var":
-        results = VAR(macro_df).fit(maxlags=max(1, min(3, len(macro_df) // 2 - 1)))
+        # Lag order is selected automatically by minimizing BIC over a
+        # candidate range. The upper bound is bounded by sample length to
+        # keep the VAR identifiable. Falling back to lag=1 if BIC fails to
+        # pick a positive order (degenerate short series).
+        max_lag_cap = max(1, min(12, len(macro_df) // 4))
+        var_model = VAR(macro_df)
+        order_sel = var_model.select_order(maxlags=max_lag_cap)
+        chosen_lag = max(1, int(order_sel.bic))
+        results = var_model.fit(chosen_lag)
         fc = results.forecast(y=macro_df.values[-results.k_ar :], steps=horizon)
-        return pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
+        result = pd.DataFrame(fc, index=future_dates, columns=macro_df.columns)
+        log.info(
+            "VAR fit | chosen_lag=%d (BIC) | maxlags_cap=%d | n_obs=%d",
+            chosen_lag,
+            max_lag_cap,
+            len(macro_df),
+        )
 
-    if model_type.lower() == "sarimax":
-        forecast_results = {}
-        for col in macro_df.columns:
-            d = 1 if adfuller(macro_df[col])[1] > 0.05 else 0
-            exog_train = macro_df.drop(columns=[col]).shift(1).bfill()
+    elif model_type.lower() in ("sarimax", "prophet"):
+        # Dynamic exogenous projection: instead of repeating the last
+        # observation horizon times (which contradicts the multi-factor
+        # forecast idea), forecast the entire macro panel via a small
+        # auxiliary VAR(BIC) once, and slice the appropriate columns as
+        # exog for each per-target univariate fit. Used by both SARIMAX
+        # (.forecast(exog=...)) and Prophet (.add_regressor(...)).
+        aux_max_lag = max(1, min(12, len(macro_df) // 4))
+        aux_var = VAR(macro_df)
+        aux_lag = max(1, int(aux_var.select_order(maxlags=aux_max_lag).bic))
+        aux_results = aux_var.fit(aux_lag)
+        aux_fc = aux_results.forecast(y=macro_df.values[-aux_results.k_ar :], steps=horizon)
+        exog_forecast_panel = pd.DataFrame(aux_fc, index=future_dates, columns=macro_df.columns)
+        log.info(
+            "%s exog projection | aux VAR lag=%d (BIC) | maxlags_cap=%d",
+            model_type.upper(),
+            aux_lag,
+            aux_max_lag,
+        )
 
-            # Scaling is crucial: macro variables have very different magnitudes.
-            sy, sx = StandardScaler(), StandardScaler()
-            y_scaled = sy.fit_transform(macro_df[[col]])
-            x_scaled = sx.fit_transform(exog_train)
+        if model_type.lower() == "sarimax":
+            forecast_results = {}
+            # Small AIC grid for non-seasonal ARIMA(p, d, q) with exogenous
+            # regressors. p,q in {0,1,2} excluding (0,0). Sample size (~75
+            # months) is too short to reliably identify a seasonal
+            # component, so seasonal_order is left at default.
+            order_grid = [(p, q) for p in range(3) for q in range(3) if (p, q) != (0, 0)]
+            chosen_orders = {}
 
-            results = SARIMAX(
-                y_scaled,
-                exog=x_scaled,
-                order=(1, d, 0),
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-            ).fit(disp=False, maxiter=500)
+            for col in macro_df.columns:
+                d = 1 if adfuller(macro_df[col])[1] > 0.05 else 0
+                exog_train = macro_df.drop(columns=[col]).shift(1).bfill()
 
-            exog_fc = pd.DataFrame(
-                [macro_df.drop(columns=[col]).iloc[-1]] * horizon,
-                columns=exog_train.columns,
-            )
-            fc_scaled = results.forecast(steps=horizon, exog=sx.transform(exog_fc))
-            forecast_results[col] = sy.inverse_transform(fc_scaled.reshape(-1, 1)).flatten()
-        return pd.DataFrame(forecast_results, index=future_dates)
+                # Scaling is crucial: macro variables have different magnitudes.
+                sy, sx = StandardScaler(), StandardScaler()
+                y_scaled = sy.fit_transform(macro_df[[col]])
+                x_scaled = sx.fit_transform(exog_train)
 
-    if model_type.lower() == "prophet":
-        forecast_results = {}
-        for col in macro_df.columns:
-            m = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-                changepoint_prior_scale=0.05,
-            )
-            m.fit(macro_df[[col]].reset_index().rename(columns={"date": "ds", col: "y"}))
-            future = m.make_future_dataframe(periods=horizon, freq="ME")
-            forecast_results[col] = m.predict(future)["yhat"].tail(horizon).values
-        return pd.DataFrame(forecast_results, index=future_dates)
+                best_aic = np.inf
+                best_results = None
+                best_pq = (1, 0)
+                for p, q in order_grid:
+                    candidate = SARIMAX(
+                        y_scaled,
+                        exog=x_scaled,
+                        order=(p, d, q),
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    ).fit(disp=False, maxiter=500)
+                    if np.isfinite(candidate.aic) and candidate.aic < best_aic:
+                        best_aic = candidate.aic
+                        best_results = candidate
+                        best_pq = (p, q)
+                chosen_orders[col] = (best_pq[0], d, best_pq[1])
 
-    return pd.DataFrame()
+                exog_fc = exog_forecast_panel.drop(columns=[col])[exog_train.columns]
+                fc_scaled = best_results.forecast(steps=horizon, exog=sx.transform(exog_fc))
+                forecast_results[col] = sy.inverse_transform(fc_scaled.reshape(-1, 1)).flatten()
+            log.info("SARIMAX orders chosen by AIC: %s", chosen_orders)
+            result = pd.DataFrame(forecast_results, index=future_dates)
+        else:  # prophet
+            # For each target macrofactor, the remaining factors are used
+            # as Prophet additional regressors. Future regressor values
+            # come from the auxiliary VAR forecast above (instead of
+            # being naively held constant).
+            forecast_results = {}
+            for col in macro_df.columns:
+                regressor_cols = [c for c in macro_df.columns if c != col]
+                train_df = macro_df.reset_index().rename(columns={"date": "ds", col: "y"})
+                train_df = train_df[["ds", "y"] + regressor_cols]
+
+                m = Prophet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                    changepoint_prior_scale=0.05,
+                )
+                for reg in regressor_cols:
+                    m.add_regressor(reg)
+                m.fit(train_df)
+
+                future = m.make_future_dataframe(periods=horizon, freq="ME")
+                # Fill historical regressor values from training data and
+                # forecasted values from the aux VAR for the horizon tail.
+                hist_regs = macro_df[regressor_cols].reset_index(drop=True)
+                fut_regs = exog_forecast_panel[regressor_cols].reset_index(drop=True)
+                future = future.reset_index(drop=True)
+                combined_regs = pd.concat([hist_regs, fut_regs], ignore_index=True)
+                for reg in regressor_cols:
+                    future[reg] = combined_regs[reg].values
+                forecast_results[col] = m.predict(future)["yhat"].tail(horizon).values
+            result = pd.DataFrame(forecast_results, index=future_dates)
+
+    # Instrumentation: accumulate fit time per model when invoked from
+    # forecast_macro_fn (which sets up self.d['_macro_fit_time']).
+    fit_time_acc = self.d.get("_macro_fit_time")
+    if fit_time_acc is not None:
+        key = model_type.lower()
+        fit_time_acc[key] = fit_time_acc.get(key, 0.0) + (time.perf_counter() - fit_t0)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +208,110 @@ def predict_macro_factors_fn(
 # ---------------------------------------------------------------------------
 
 
+def _predict_target_fn(
+    self: "Portfolio",
+    target: str,
+    horizon: int = 1,
+    training_offset: int = 0,
+    model_type: str = "var",
+    macro_forecast: pd.DataFrame = None,
+) -> "Portfolio":
+    """Internal OLS-based forecaster for PD or DD.
+
+    Args:
+        self: Portfolio instance.
+        target: 'PD' or 'DD'.
+        horizon: Forecasting horizon in months.
+        training_offset: Months of history to hide for backtesting.
+        model_type: Macro model type ('var', 'sarimax', 'prophet').
+        macro_forecast: Optional pre-computed macro factor forecast.
+
+    Returns:
+        Portfolio: self with results in self.d['<target>_forecast'] and
+            full per-ticker trajectory in self.d['<target>_forecast_path'].
+    """
+    if target not in {"PD", "DD"}:
+        raise ValueError(f"target must be 'PD' or 'DD', got {target!r}")
+    is_pd = target == "PD"
+    key_lc = target.lower()
+    pred_col = f"predicted_{key_lc}"
+    ref_col = f"reference_{key_lc}"
+
+    if horizon < 0:
+        training_offset = abs(horizon)
+        horizon = abs(horizon)
+
+    if macro_forecast is None:
+        macro_forecast = predict_macro_factors_fn(
+            self, horizon=horizon, training_offset=training_offset, model_type=model_type
+        )
+
+    target_pivot = self.d["portfolio"][["date", "ticker", target]].pivot(index="date", columns="ticker", values=target)
+    target_monthly = target_pivot.resample("ME").last()
+    target_monthly.index = target_monthly.index.normalize() + pd.offsets.MonthEnd(0)
+
+    macro_cols = macro_forecast.columns.tolist()
+    macro_hist = (
+        self.d["portfolio"][["date"] + macro_cols]
+        .drop_duplicates("date")
+        .set_index("date")
+        .resample("ME")
+        .mean()
+        .dropna()
+    )
+    macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
+
+    combined = pd.concat([target_monthly, macro_hist], axis=1).dropna()
+    train = combined.iloc[:-training_offset] if training_offset > 0 else combined
+
+    predictions = {}
+    paths = {}
+    for ticker in target_monthly.columns:
+        if ticker not in train.columns:
+            continue
+        y = train[ticker]
+        x = sm.add_constant(train[macro_cols])
+        model = sm.OLS(y, x).fit()
+        x_pred = sm.add_constant(macro_forecast, has_constant="add")
+        if "const" not in x_pred.columns:
+            x_pred["const"] = 1.0
+        full_path = model.predict(x_pred)
+        paths[ticker] = full_path.values
+        predictions[ticker] = full_path.iloc[-1]
+
+    result_df = pd.DataFrame.from_dict(predictions, orient="index", columns=[pred_col])
+    result_df.index.name = "ticker"
+    target_date = macro_forecast.index[-1]
+    comparison = (
+        target_monthly.loc[target_date] if target_date in target_monthly.index else target_pivot.ffill().iloc[-1]
+    )
+    result_df[ref_col] = comparison
+    result_df["delta"] = result_df[pred_col] - result_df[ref_col]
+    result_df["model"] = model_type
+
+    path_df = pd.DataFrame(paths, index=macro_forecast.index)
+    if is_pd:
+        # PD must lie in [0, 1] — clip both scalar prediction and full
+        # trajectory consistently.
+        result_df[pred_col] = result_df[pred_col].clip(0.0, 1.0)
+        path_df = path_df.clip(0.0, 1.0)
+    else:
+        # Derive PD from DD via the standard normal CDF; norm.cdf already
+        # returns values in [0, 1] so no clip is needed.
+        result_df["predicted_pd"] = norm.cdf(-result_df[pred_col].astype(float))
+        result_df["reference_pd"] = norm.cdf(-result_df[ref_col].astype(float))
+
+    self.d[f"{key_lc}_forecast"] = result_df
+    self.d[f"{key_lc}_forecast_path"] = path_df
+    return self
+
+
 def predict_pd_fn(
     self: "Portfolio",
     horizon: int = 1,
     training_offset: int = 0,
     model_type: str = "var",
+    macro_forecast: pd.DataFrame = None,
 ) -> "Portfolio":
     """Predicts PD for portfolio assets based on macro OLS model.
 
@@ -138,59 +320,20 @@ def predict_pd_fn(
         horizon: Forecasting horizon in months.
         training_offset: Months of history to hide for backtesting.
         model_type: Macro model type ('var', 'sarimax', 'prophet').
+        macro_forecast: Optional pre-computed macro factor forecast.
 
     Returns:
-        Portfolio: self with results in self.d['pd_forecast'].
+        Portfolio: self with results in self.d['pd_forecast'] and full
+            trajectory in self.d['pd_forecast_path'].
     """
-    if horizon < 0:
-        training_offset = abs(horizon)
-        horizon = abs(horizon)
-
-    macro_forecast = predict_macro_factors_fn(
-        self, horizon=horizon, training_offset=training_offset, model_type=model_type
+    return _predict_target_fn(
+        self,
+        target="PD",
+        horizon=horizon,
+        training_offset=training_offset,
+        model_type=model_type,
+        macro_forecast=macro_forecast,
     )
-
-    pd_pivot = self.d["portfolio"][["date", "ticker", "PD"]].pivot(index="date", columns="ticker", values="PD")
-    pd_monthly = pd_pivot.resample("ME").last()
-    pd_monthly.index = pd_monthly.index.normalize() + pd.offsets.MonthEnd(0)
-
-    macro_cols = macro_forecast.columns.tolist()
-    macro_hist = (
-        self.d["portfolio"][["date"] + macro_cols]
-        .drop_duplicates("date")
-        .set_index("date")
-        .resample("ME")
-        .mean()
-        .dropna()
-    )
-    macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
-
-    combined = pd.concat([pd_monthly, macro_hist], axis=1).dropna()
-    train = combined.iloc[:-training_offset] if training_offset > 0 else combined
-
-    predictions = {}
-    for ticker in pd_monthly.columns:
-        if ticker not in train.columns:
-            continue
-        y = train[ticker]
-        x = sm.add_constant(train[macro_cols])
-        model = sm.OLS(y, x).fit()
-        x_pred = sm.add_constant(macro_forecast, has_constant="add")
-        if "const" not in x_pred.columns:
-            x_pred["const"] = 1.0
-        predictions[ticker] = model.predict(x_pred).iloc[-1]
-
-    result_df = pd.DataFrame.from_dict(predictions, orient="index", columns=["predicted_pd"])
-    result_df.index.name = "ticker"
-    target_date = macro_forecast.index[-1]
-    comparison_pd = pd_monthly.loc[target_date] if target_date in pd_monthly.index else pd_pivot.ffill().iloc[-1]
-    result_df["reference_pd"] = comparison_pd
-    result_df["delta"] = result_df["predicted_pd"] - result_df["reference_pd"]
-    result_df["predicted_pd"] = result_df["predicted_pd"].clip(0, 1)
-    result_df["model"] = model_type
-
-    self.d["pd_forecast"] = result_df
-    return self
 
 
 def predict_dd_fn(
@@ -198,68 +341,29 @@ def predict_dd_fn(
     horizon: int = 1,
     training_offset: int = 0,
     model_type: str = "var",
+    macro_forecast: pd.DataFrame = None,
 ) -> "Portfolio":
-    """Predicts Distance to Default (DD) based on macro OLS model.
+    """Predicts DD for portfolio assets based on macro OLS model.
 
     Args:
         self: Portfolio instance.
         horizon: Forecasting horizon in months.
         training_offset: Months of history to hide for backtesting.
         model_type: Macro model type ('var', 'sarimax', 'prophet').
+        macro_forecast: Optional pre-computed macro factor forecast.
 
     Returns:
-        Portfolio: self with results in self.d['dd_forecast'].
+        Portfolio: self with results in self.d['dd_forecast'] and full
+            trajectory in self.d['dd_forecast_path'].
     """
-    if horizon < 0:
-        training_offset = abs(horizon)
-        horizon = abs(horizon)
-
-    macro_forecast = predict_macro_factors_fn(
-        self, horizon=horizon, training_offset=training_offset, model_type=model_type
+    return _predict_target_fn(
+        self,
+        target="DD",
+        horizon=horizon,
+        training_offset=training_offset,
+        model_type=model_type,
+        macro_forecast=macro_forecast,
     )
-
-    dd_pivot = self.d["portfolio"][["date", "ticker", "DD"]].pivot(index="date", columns="ticker", values="DD")
-    dd_monthly = dd_pivot.resample("ME").last()
-    dd_monthly.index = dd_monthly.index.normalize() + pd.offsets.MonthEnd(0)
-
-    macro_cols = macro_forecast.columns.tolist()
-    macro_hist = (
-        self.d["portfolio"][["date"] + macro_cols]
-        .drop_duplicates("date")
-        .set_index("date")
-        .resample("ME")
-        .mean()
-        .dropna()
-    )
-    macro_hist.index = macro_hist.index.normalize() + pd.offsets.MonthEnd(0)
-
-    combined = pd.concat([dd_monthly, macro_hist], axis=1).dropna()
-    train = combined.iloc[:-training_offset] if training_offset > 0 else combined
-
-    predictions = {}
-    for ticker in dd_monthly.columns:
-        if ticker not in train.columns:
-            continue
-        y = train[ticker]
-        x = sm.add_constant(train[macro_cols])
-        model = sm.OLS(y, x).fit()
-        x_pred = sm.add_constant(macro_forecast, has_constant="add")
-        if "const" not in x_pred.columns:
-            x_pred["const"] = 1.0
-        predictions[ticker] = model.predict(x_pred).iloc[-1]
-
-    result_df = pd.DataFrame.from_dict(predictions, orient="index", columns=["predicted_dd"])
-    result_df.index.name = "ticker"
-    target_date = macro_forecast.index[-1]
-    comparison_dd = dd_monthly.loc[target_date] if target_date in dd_monthly.index else dd_pivot.ffill().iloc[-1]
-    result_df["reference_dd"] = comparison_dd
-    result_df["delta"] = result_df["predicted_dd"] - result_df["reference_dd"]
-    result_df["model"] = model_type
-    result_df["predicted_pd"] = norm.cdf(-result_df["predicted_dd"].astype(float))
-    result_df["reference_pd"] = norm.cdf(-result_df["reference_dd"].astype(float))
-
-    self.d["dd_forecast"] = result_df
-    return self
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +464,13 @@ def forecast_macro_fn(
     if isinstance(models, str):
         models = [models]
 
+    # Instrumentation: reset fit counters/timers so that nested
+    # predict_macro_factors_fn calls feed into them. Aggregated and logged
+    # at the end of this function for before/after benchmarking.
+    self.d["_macro_fit_counter"] = {}
+    self.d["_macro_fit_time"] = {}
+    overall_t0 = time.perf_counter()
+
     is_backtest = horizon < 0
     if is_backtest:
         n_months = abs(horizon)
@@ -386,27 +497,76 @@ def forecast_macro_fn(
             for offset in range(n_months, 0, -1):
                 fc_step = predict_macro_factors_fn(self, horizon=1, training_offset=offset, model_type=m_type)
                 if target_col == "PD":
-                    predict_pd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
+                    predict_pd_fn(self, horizon=1, training_offset=offset, model_type=m_type, macro_forecast=fc_step)
                     fc_step["PD"] = self.d["pd_forecast"]["predicted_pd"].mean()
                 else:
-                    predict_dd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
+                    predict_dd_fn(self, horizon=1, training_offset=offset, model_type=m_type, macro_forecast=fc_step)
                     fc_step["DD"] = self.d["dd_forecast"]["predicted_dd"].mean()
                 step_fcs.append(fc_step)
             forecast_dfs[m_type] = pd.concat(step_fcs)
         else:
             fc_df = predict_macro_factors_fn(self, horizon=horizon, training_offset=training_offset, model_type=m_type)
-            trajectory = []
-            for i in range(1, horizon + 1):
-                if target_col == "PD":
-                    predict_pd_fn(self, horizon=i, training_offset=training_offset, model_type=m_type)
-                    trajectory.append(self.d["pd_forecast"]["predicted_pd"].mean())
-                else:
-                    predict_dd_fn(self, horizon=i, training_offset=training_offset, model_type=m_type)
-                    trajectory.append(self.d["dd_forecast"]["predicted_dd"].mean())
+            # Single OLS pass over the full H-step macro forecast yields
+            # the entire trajectory at once via predict_*_fn's *_path
+            # output. Avoids the H-times redundant OLS refit of the
+            # previous design.
+            if target_col == "PD":
+                predict_pd_fn(
+                    self,
+                    horizon=horizon,
+                    training_offset=training_offset,
+                    model_type=m_type,
+                    macro_forecast=fc_df,
+                )
+                trajectory = self.d["pd_forecast_path"].mean(axis=1).values
+            else:
+                predict_dd_fn(
+                    self,
+                    horizon=horizon,
+                    training_offset=training_offset,
+                    model_type=m_type,
+                    macro_forecast=fc_df,
+                )
+                trajectory = self.d["dd_forecast_path"].mean(axis=1).values
             fc_df[target_col] = trajectory
             forecast_dfs[m_type] = fc_df
 
     self.d["macro_forecast_data"] = {"macro_df": macro_df, "forecast_dfs": forecast_dfs}
+
+    # Instrumentation summary: total wall time, number of macro fits per
+    # model, cumulative fit time per model, and per-model trajectory stats
+    # for the forecast target (DD / PD). Logged for before/after comparison.
+    elapsed = time.perf_counter() - overall_t0
+    fit_counter = self.d.pop("_macro_fit_counter", {})
+    fit_time = self.d.pop("_macro_fit_time", {})
+
+    perf_rows = []
+    for m_type in models:
+        key = m_type.lower()
+        traj = forecast_dfs[m_type][target_col].astype(float)
+        perf_rows.append(
+            {
+                "model": m_type,
+                "macro_fits": fit_counter.get(key, 0),
+                "fit_time_s": round(fit_time.get(key, 0.0), 3),
+                f"{target_col}_mean": round(traj.mean(), 4),
+                f"{target_col}_std": round(traj.std(ddof=0), 4),
+                f"{target_col}_min": round(traj.min(), 4),
+                f"{target_col}_max": round(traj.max(), 4),
+                f"{target_col}_last": round(traj.iloc[-1], 4),
+            }
+        )
+    perf_df = pd.DataFrame(perf_rows)
+    log.info(
+        "forecast_macro_fn finished | elapsed=%.2fs | horizon=%d | target=%s | backtest=%s | models=%s",
+        elapsed,
+        abs(horizon),
+        target_col,
+        is_backtest,
+        list(models),
+    )
+    log.log_dataframe(perf_df, title="forecast_macro performance & forecast summary")
+
     log.info("Macro forecast data computed and stored.")
     return self
 
