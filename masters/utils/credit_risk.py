@@ -619,7 +619,15 @@ def analyze_macro_dd_significance_fn(
 ) -> "Portfolio":
     """Analyzes statistical significance of macro variables on DD.
 
-    Runs Panel OLS with entity Fixed Effects and clustered standard errors.
+    Runs Panel OLS with entity Fixed Effects and two-way clustered
+    standard errors (entity + time). Time clustering is essential because
+    macro regressors are constant across tickers within each period, so
+    residuals are strongly cross-sectionally correlated and entity-only
+    clustering would understate standard errors.
+
+    Also reports the macro correlation matrix and Variance Inflation
+    Factors to flag multicollinearity, which often explains a low within
+    R-squared in this kind of panel.
 
     Args:
         self: Portfolio instance.
@@ -629,21 +637,24 @@ def analyze_macro_dd_significance_fn(
         Portfolio: self with results in self.d['macro_significance'].
     """
     from linearmodels.panel import PanelOLS
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-    panel = self.d["portfolio"][["date", "ticker", "DD"] + cfg.MACRO_COLS].dropna().copy()
-    panel["month"] = panel["date"].dt.to_period("M").dt.to_timestamp()
-    monthly = (
-        panel.groupby(["ticker", "month"])
-        .agg(DD=("DD", "mean"), **{col: (col, "mean") for col in cfg.MACRO_COLS})
-        .reset_index()
-    )
+    # End-of-month DD per ticker — same convention as predict_dd_fn
+    # (last observation of the month) to keep the significance analysis
+    # consistent with the forecasting pipeline.
+    df = self.d["portfolio"][["date", "ticker", "DD"] + cfg.MACRO_COLS].dropna().copy()
+    df["month"] = df["date"].dt.to_period("M").dt.to_timestamp("M").dt.normalize()
+    dd_monthly = df.groupby(["ticker", "month"])["DD"].last()
+    macro_monthly = df.groupby("month")[cfg.MACRO_COLS].last()
+    monthly = dd_monthly.to_frame().join(macro_monthly, on="month").dropna()
 
-    monthly = monthly.set_index(["ticker", "month"])
+    # Entity FE absorbs the constant; do NOT add one explicitly to avoid
+    # a perfect-collinearity warning and keep coefficient indexing clean.
     panel_model = PanelOLS(
         monthly["DD"],
-        sm.add_constant(monthly[cfg.MACRO_COLS]),
+        monthly[cfg.MACRO_COLS],
         entity_effects=True,
-    ).fit(cov_type="clustered", cluster_entity=True)
+    ).fit(cov_type="clustered", cluster_entity=True, cluster_time=True)
 
     ols_summary = {
         "r_squared": panel_model.rsquared,
@@ -654,7 +665,7 @@ def analyze_macro_dd_significance_fn(
         "n_entities": int(panel_model.entity_info.total),
         "coefficients": {},
     }
-    for var in ["const"] + cfg.MACRO_COLS:
+    for var in cfg.MACRO_COLS:
         ols_summary["coefficients"][var] = {
             "coef": panel_model.params[var],
             "std_err": panel_model.std_errors[var],
@@ -663,19 +674,43 @@ def analyze_macro_dd_significance_fn(
             "significant": panel_model.pvalues[var] < 0.05,
         }
 
+    # Multicollinearity diagnostics on the time-varying macro panel.
+    macro_design = macro_monthly.dropna()
+    corr_matrix = macro_design.corr()
+    vif_design = sm.add_constant(macro_design)
+    vif = pd.Series(
+        {
+            col: variance_inflation_factor(vif_design.values, i)
+            for i, col in enumerate(vif_design.columns)
+            if col != "const"
+        },
+        name="VIF",
+    )
+
     self.d["macro_significance"] = {
         "ols": ols_summary,
         "panel_model": panel_model,
+        "macro_corr": corr_matrix,
+        "macro_vif": vif,
     }
 
     if verbose:
         log.info("=" * 80)
-        log.info("PANEL OLS (Entity FE, Clustered SE): DD ~ macro variables")
+        log.info("PANEL OLS (Entity FE, 2-way Clustered SE entity+time): DD ~ macro variables")
         log.info("=" * 80)
-        log.info(str(panel_model.summary.tables[0]))
+        log.info(
+            "N obs=%d | entities=%d | time periods=%d | R2=%.4f (within=%.4f) | F=%.2f (p=%.2e)",
+            ols_summary["n_obs"],
+            ols_summary["n_entities"],
+            int(panel_model.time_info.total),
+            ols_summary["r_squared"],
+            ols_summary["r_squared_within"],
+            ols_summary["f_statistic"],
+            ols_summary["f_pvalue"],
+        )
 
         coef_data = []
-        for var in ["const"] + cfg.MACRO_COLS:
+        for var in cfg.MACRO_COLS:
             c = ols_summary["coefficients"][var]
             sig = "***" if c["p_value"] < 0.001 else "**" if c["p_value"] < 0.01 else "*" if c["p_value"] < 0.05 else ""
             coef_data.append(
@@ -683,13 +718,9 @@ def analyze_macro_dd_significance_fn(
             )
         coef_df = pd.DataFrame(coef_data, columns=["Variable", "Coef", "Std Err", "t-stat", "p-value", "Sig"])
         log.info("\n" + coef_df.to_string(index=False))
-        log.info(
-            "R-squared: %.4f, R-squared (within): %.4f",
-            ols_summary["r_squared"],
-            ols_summary["r_squared_within"],
-        )
-        log.info("F-statistic: %.2f, p-value: %.2e", ols_summary["f_statistic"], ols_summary["f_pvalue"])
-        log.info("N observations: %d, N entities: %d", ols_summary["n_obs"], ols_summary["n_entities"])
+
+        log.info("Macro correlation matrix:\n" + corr_matrix.round(3).to_string())
+        log.info("Macro VIF (>10 indicates strong multicollinearity):\n" + vif.round(2).to_string())
 
     log.info("Macro-DD significance analysis completed.")
     return self
