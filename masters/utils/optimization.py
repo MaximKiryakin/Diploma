@@ -11,7 +11,7 @@ mutate ``self.d`` in place, returning ``self`` for method chaining.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Union, TYPE_CHECKING
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -399,6 +399,14 @@ def backtest_portfolio_strategies_fn(
     """
     strategies: List[str] = [strategy] if isinstance(strategy, str) else list(strategy)
 
+    # Fix #2: lambda_risk is meaningful only for the mean-EL objective.
+    if lambda_risk != 0.5 and any(s != "mean_el" for s in strategies):
+        log.warning(
+            "lambda_risk=%.3f is ignored for strategies %s; it only affects 'mean_el'.",
+            lambda_risk,
+            [s for s in strategies if s != "mean_el"],
+        )
+
     prices_pivot = self.d["portfolio"].pivot(index="date", columns="ticker", values="close")
     monthly_prices = prices_pivot.resample("ME").last()
     monthly_returns = monthly_prices.pct_change().dropna()
@@ -448,6 +456,10 @@ def backtest_portfolio_strategies_fn(
             "results": list(hist_baseline),
         }
 
+    # Fix #3: passive is true buy-and-hold equal weights at backtest start;
+    # no monthly rebalancing, weights drift with realized returns.
+    w_passive_actual: Optional[pd.Series] = None
+
     for offset in range(n_months, 0, -1):
         target_date = monthly_returns.index[-offset]
 
@@ -475,10 +487,10 @@ def backtest_portfolio_strategies_fn(
             w_active_actual = st["w_active_actual"]
 
             if w_active_actual is None:
+                # Fix #5: initial allocation is not a rebalance, only an entry.
                 w_active_actual = w_target.copy()
                 turnover = w_target.abs().sum()
-                rebalanced = True
-                st["total_rebalances"] += 1
+                rebalanced = False
             else:
                 rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
                 common = w_active_actual.index.intersection(available_tickers)
@@ -508,10 +520,18 @@ def backtest_portfolio_strategies_fn(
             ret_active = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
             el_active = np.sum(w_active_actual * monthly_pds.loc[target_date, available_tickers] * lgd)
 
-            n_tickers = len(available_tickers)
-            w_passive = pd.Series(1.0 / n_tickers, index=available_tickers)
-            ret_passive = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
-            el_passive = np.sum(w_passive * monthly_pds.loc[target_date, available_tickers] * lgd)
+            # Fix #3: passive buy-and-hold (initialised once, drifts thereafter).
+            if w_passive_actual is None:
+                n_tickers = len(available_tickers)
+                w_passive_actual = pd.Series(1.0 / n_tickers, index=available_tickers)
+            rets_p = monthly_returns.loc[target_date].reindex(w_passive_actual.index).fillna(0.0)
+            ret_passive = float(np.sum(w_passive_actual * rets_p))
+            pds_p = monthly_pds.loc[target_date].reindex(w_passive_actual.index).fillna(0.0)
+            el_passive = float(np.sum(w_passive_actual * pds_p * lgd))
+            w_passive_drifted = w_passive_actual * (1.0 + rets_p)
+            total_p = w_passive_drifted.sum()
+            if total_p > 0:
+                w_passive_actual = w_passive_drifted / total_p
 
             weight_record = {"date": target_date, "rebalanced": rebalanced}
             for ticker in available_tickers:
@@ -542,12 +562,22 @@ def backtest_portfolio_strategies_fn(
         all_backtests[strat] = backtest_df
 
         bt_only = backtest_df.tail(n_months)
+        # Fix #7: add Sharpe (annualised) and RAROC = Total Return / Avg Realized EL.
+        ann = float(np.sqrt(cfg.MONTHS_PER_YEAR))
+        mean_a = float(bt_only["Active_Return"].mean())
+        std_a = float(bt_only["Active_Return"].std())
+        sharpe_a = round((mean_a / std_a) * ann, 4) if std_a > 0 else float("nan")
+        total_ret_a = float((1 + bt_only["Active_Return"]).prod() - 1)
+        avg_el_a = float(bt_only["Active_EL"].mean())
+        raroc_a = round(total_ret_a / avg_el_a, 4) if avg_el_a > 0 else float("nan")
         comparison_rows.append(
             {
                 "Strategy": strat,
-                "Total Return (%)": round(((1 + bt_only["Active_Return"]).prod() - 1) * 100, 4),
-                "Avg Realized EL (%)": round(bt_only["Active_EL"].mean() * 100, 6),
-                "Realized Vol (%)": round(bt_only["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
+                "Total Return (%)": round(total_ret_a * 100, 4),
+                "Avg Realized EL (%)": round(avg_el_a * 100, 6),
+                "Realized Vol (%)": round(std_a * ann * 100, 4),
+                "Sharpe": sharpe_a,
+                "RAROC": raroc_a,
                 "Total TC (%)": round(bt_only["TC"].sum() * 100, 4),
                 "Rebalances": int(bt_only["Rebalanced"].sum()),
                 "Avg Turnover (%)": round(bt_only["Turnover"].mean() * 100, 4),
@@ -562,12 +592,21 @@ def backtest_portfolio_strategies_fn(
 
     last_bt = all_backtests[strategies[-1]]
     bt_passive = last_bt.tail(n_months)
+    ann_p = float(np.sqrt(cfg.MONTHS_PER_YEAR))
+    mean_p = float(bt_passive["Passive_Return"].mean())
+    std_p = float(bt_passive["Passive_Return"].std())
+    sharpe_p = round((mean_p / std_p) * ann_p, 4) if std_p > 0 else float("nan")
+    total_ret_p = float((1 + bt_passive["Passive_Return"]).prod() - 1)
+    avg_el_p = float(bt_passive["Passive_EL"].mean())
+    raroc_p = round(total_ret_p / avg_el_p, 4) if avg_el_p > 0 else float("nan")
     comparison_rows.append(
         {
-            "Strategy": "passive (equal)",
-            "Total Return (%)": round(((1 + bt_passive["Passive_Return"]).prod() - 1) * 100, 4),
-            "Avg Realized EL (%)": round(bt_passive["Passive_EL"].mean() * 100, 6),
-            "Realized Vol (%)": round(bt_passive["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
+            "Strategy": "passive (equal, buy-and-hold)",
+            "Total Return (%)": round(total_ret_p * 100, 4),
+            "Avg Realized EL (%)": round(avg_el_p * 100, 6),
+            "Realized Vol (%)": round(std_p * ann_p * 100, 4),
+            "Sharpe": sharpe_p,
+            "RAROC": raroc_p,
             "Total TC (%)": 0.0,
             "Rebalances": 0,
             "Avg Turnover (%)": 0.0,

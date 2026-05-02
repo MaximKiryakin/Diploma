@@ -326,7 +326,7 @@ class Portfolio:
         tail: int = 12,
         target_col: str = "DD",
         verbose: bool = False,
-        figsize: tuple = (12, 14),
+        figsize: tuple = (10, 5),
     ) -> "Portfolio":
         """Plots historical and forecasted macro and portfolio DD/PD."""
         return credit_risk.plot_macro_forecast_fn(

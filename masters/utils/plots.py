@@ -721,160 +721,215 @@ def plot_strategy_comparison(
     verbose: bool = False,
     all_backtests: dict = None,
 ) -> None:
-    """Plots the cumulative returns and realized EL comparison between strategies.
+    """Plots strategy backtest results as two separate figures.
 
-    When ``all_backtests`` is provided (dict[str, DataFrame]), plots one line
-    per strategy.  Falls back to the legacy two-line (Active vs Passive) view
-    when only ``backtest_df`` is given.
+    Figure 1: cumulative returns per active strategy plus passive buy-and-hold.
+    Figure 2: portfolio average PD (bars, left axis) combined with realized EL
+              per strategy (lines, right axis), annotated with curated
+              economic events for August 2023, January 2025 and March 2025.
 
     Args:
-        backtest_df: Backtest results with Active/Passive returns and EL (legacy, used for Passive baseline).
+        backtest_df: Backtest results with Active/Passive returns and EL.
         comparison_df: Legacy parameter, kept for backward compatibility.
         tail: Number of last periods to show (0 = all).
-        verbose: Whether to display the plot interactively.
+        verbose: Whether to display plots interactively.
         all_backtests: Dict mapping strategy name -> backtest DataFrame.
     """
     if backtest_df.empty:
         log.warning("Strategy backtest DataFrame is empty.")
         return
+    if not all_backtests:
+        log.warning("plot_strategy_comparison: all_backtests is empty.")
+        return
 
-    # Color palette for strategies
     strategy_colors = {
         "mean_el": "#1f77b4",
         "cvar": "#ff7f0e",
         "risk_parity": "#2ca02c",
     }
     strategy_labels = {
-        "mean_el": "Active: Mean-EL (SLSQP)",
-        "cvar": "Active: CVaR (LP)",
-        "risk_parity": "Active: Risk Parity",
+        "mean_el": "Активная: Mean-EL",
+        "cvar": "Активная: CVaR",
+        "risk_parity": "Активная: Risk Parity",
     }
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), sharex=True)
+    last_bt = list(all_backtests.values())[-1]
+    plot_passive = last_bt.tail(tail) if tail > 0 else last_bt
 
-    if all_backtests and len(all_backtests) > 0:
-        # Multi-strategy mode
-        for strat_name, bt_df in all_backtests.items():
-            plot_df = bt_df.tail(tail) if tail > 0 else bt_df
-            plot_df = plot_df.copy()
-            plot_df["Active_CumRet"] = (1 + plot_df["Active_Return"]).cumprod() - 1
-            color = strategy_colors.get(strat_name, None)
-            label = strategy_labels.get(strat_name, strat_name)
+    diff_mask = backtest_df["Active_Return"] != backtest_df["Passive_Return"]
+    bt_start = backtest_df.index[diff_mask.argmax()] if diff_mask.any() else None
 
-            ax1.plot(
-                plot_df.index,
-                plot_df["Active_CumRet"] * 100,
-                label=label,
-                linewidth=2.5,
-                marker="o",
-                markersize=3,
-                color=color,
-            )
-            ax2.plot(
-                plot_df.index,
-                plot_df["Active_EL"] * 100,
-                label=f"{label} EL",
-                linewidth=2,
-                color=color,
-            )
+    def _draw_bt_line(ax) -> None:
+        if bt_start is not None and bt_start in plot_passive.index:
+            ax.axvline(x=bt_start, color="black", linestyle=":", alpha=0.5)
 
-        # Passive baseline (same for all strategies -- take from last backtest)
-        last_bt = list(all_backtests.values())[-1]
-        plot_passive = last_bt.tail(tail) if tail > 0 else last_bt
-        plot_passive = plot_passive.copy()
-        plot_passive["Passive_CumRet"] = (1 + plot_passive["Passive_Return"]).cumprod() - 1
+    def _rotate_xticks(ax) -> None:
+        plt.setp(ax.get_xticklabels(), rotation=90, ha="center")
 
-        ax1.plot(
-            plot_passive.index,
-            plot_passive["Passive_CumRet"] * 100,
-            label="Passive (Equal-Weight)",
-            linewidth=2,
-            linestyle="--",
-            color="gray",
-            alpha=0.8,
-        )
-        ax2.plot(
-            plot_passive.index,
-            plot_passive["Passive_EL"] * 100,
-            label="Passive EL",
-            color="gray",
-            linestyle="--",
+    def _local_peak(series: pd.Series, target_ts: pd.Timestamp, window_months: int = 1):
+        lo = target_ts - pd.DateOffset(months=window_months)
+        hi = target_ts + pd.DateOffset(months=window_months)
+        sub = series[(series.index >= lo) & (series.index <= hi)]
+        if sub.empty:
+            pos = series.index.get_indexer([target_ts], method="nearest")[0]
+            idx = series.index[pos]
+            return idx, series.loc[idx]
+        peak_idx = sub.idxmax()
+        return peak_idx, sub.loc[peak_idx]
+
+    def _annotate_event(ax, x, y, text: str, color: str, xytext, ha: str = "left") -> None:
+        ax.annotate(
+            text,
+            xy=(x, y),
+            xytext=xytext,
+            textcoords="offset points",
+            ha=ha,
+            fontsize=8,
+            color="black",
+            arrowprops=dict(arrowstyle="->", color=color, lw=1.4),
+            bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", ec=color, alpha=0.95),
         )
 
-        if "Actual_PD" in plot_passive.columns:
-            ax2.bar(
-                plot_passive.index,
-                plot_passive["Actual_PD"] * 100,
-                label="Portfolio Avg PD (%)",
-                color="blue",
-                alpha=0.12,
-                width=20,
-            )
-    else:
-        # Legacy two-line mode
-        plot_df = backtest_df.tail(tail) if tail > 0 else backtest_df
-        plot_df = plot_df.copy()
-        plot_df["Active_CumRet"] = (1 + plot_df["Active_Return"]).cumprod() - 1
-        plot_df["Passive_CumRet"] = (1 + plot_df["Passive_Return"]).cumprod() - 1
-
-        ax1.plot(
+    # --- Figure 1: cumulative return ---
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for strat_name, bt_df in all_backtests.items():
+        plot_df = bt_df.tail(tail) if tail > 0 else bt_df
+        cum_ret = ((1 + plot_df["Active_Return"]).cumprod() - 1) * 100
+        ax.plot(
             plot_df.index,
-            plot_df["Active_CumRet"] * 100,
-            label="Active (Optimized)",
-            linewidth=3,
+            cum_ret,
+            label=strategy_labels.get(strat_name, strat_name),
+            color=strategy_colors.get(strat_name),
+            linewidth=2.5,
             marker="o",
-            markersize=4,
+            markersize=3,
         )
-        ax1.plot(
-            plot_df.index,
-            plot_df["Passive_CumRet"] * 100,
-            label="Passive (Equal)",
-            linewidth=2,
-            linestyle="--",
-            alpha=0.8,
-        )
-        ax2.plot(plot_df.index, plot_df["Active_EL"] * 100, label="Active Realized EL (%)", color="red", linewidth=2)
-        ax2.plot(
-            plot_df.index, plot_df["Passive_EL"] * 100, label="Passive Realized EL (%)", color="gray", linestyle="--"
-        )
-        if "Actual_PD" in plot_df.columns:
-            ax2.bar(
-                plot_df.index,
-                plot_df["Actual_PD"] * 100,
-                label="Portfolio Avg PD (%)",
-                color="blue",
-                alpha=0.15,
-                width=20,
-            )
-
-    ax1.set_title("Strategy Backtest: Cumulative Returns (%)", fontsize=14, fontweight="bold")
-    ax1.set_ylabel("Return (%)", fontsize=12)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="upper left")
-
-    ax2.set_title("Portfolio Credit Risk: Realized EL and Average PD", fontsize=14, fontweight="bold")
-    ax2.set_ylabel("Loss / Probability (%)", fontsize=12)
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper left")
-
-    # Add vertical line for backtest start
-    diff = backtest_df["Active_Return"] != backtest_df["Passive_Return"]
-    backtest_start_date = backtest_df.index[diff.argmax()] if diff.any() else None
-
-    if backtest_start_date:
-        ref_df = backtest_df.tail(tail) if tail > 0 else backtest_df
-        if backtest_start_date in ref_df.index:
-            for ax in [ax1, ax2]:
-                ax.axvline(x=backtest_start_date, color="black", linestyle=":", alpha=0.5)
-                ax.text(backtest_start_date, ax.get_ylim()[1], " Backtest Start", verticalalignment="top")
-
-    plt.xlabel("Date", fontsize=12)
-    plt.xticks(rotation=45)
+    cum_ret_p = ((1 + plot_passive["Passive_Return"]).cumprod() - 1) * 100
+    ax.plot(
+        plot_passive.index,
+        cum_ret_p,
+        label="Пассивная (равные веса, buy-and-hold)",
+        color="gray",
+        linestyle="--",
+        linewidth=2,
+        alpha=0.85,
+    )
+    _draw_bt_line(ax)
+    ax.set_title("Накопленная доходность стратегий, %", fontsize=14)
+    ax.set_ylabel("Доходность, %", fontsize=12)
+    ax.set_xlabel("Дата", fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=10)
+    _rotate_xticks(ax)
     plt.tight_layout()
+    save_path_1 = str(cfg.GRAPHS_DIR / "strategy_backtest_cumret.png")
+    _finalize_plot(save_path_1, verbose)
+    log.info("Strategy cumret plot saved: %s", save_path_1)
 
-    save_path = str(cfg.GRAPHS_DIR / "strategy_backtest_comparison.png")
-    _finalize_plot(save_path, verbose)
-    log.info("Strategy comparison plot saved: %s", save_path)
+    # --- Figure 2: realized EL (lines) + portfolio PD (bars) on twin axes ---
+    fig, ax = plt.subplots(figsize=(11, 5))
+    pd_pct = None
+    if "Actual_PD" in plot_passive.columns:
+        pd_pct = plot_passive["Actual_PD"] * 100
+        ax.bar(
+            plot_passive.index,
+            pd_pct,
+            color="steelblue",
+            alpha=0.25,
+            width=20,
+            label="Средняя PD портфеля, %",
+        )
+    ax.set_ylabel("PD, %", fontsize=12, color="steelblue")
+    ax.tick_params(axis="y", labelcolor="steelblue")
+
+    ax2 = ax.twinx()
+    ref_el = None
+    for strat_name, bt_df in all_backtests.items():
+        plot_df = bt_df.tail(tail) if tail > 0 else bt_df
+        el_pct = plot_df["Active_EL"] * 100
+        ax2.plot(
+            plot_df.index,
+            el_pct,
+            label=strategy_labels.get(strat_name, strat_name),
+            color=strategy_colors.get(strat_name),
+            linewidth=2,
+        )
+        if strat_name == "mean_el":
+            ref_el = el_pct
+    ax2.plot(
+        plot_passive.index,
+        plot_passive["Passive_EL"] * 100,
+        label="Пассивная",
+        color="gray",
+        linestyle="--",
+        linewidth=2,
+        alpha=0.85,
+    )
+    ax2.set_ylabel("EL, %", fontsize=12)
+
+    rebal_df = list(all_backtests.values())[0].tail(tail) if tail > 0 else list(all_backtests.values())[0]
+    rebal_dates = rebal_df.index[rebal_df["Rebalanced"].fillna(False)]
+    for d in rebal_dates:
+        ax.axvline(x=d, color="crimson", linestyle="-", alpha=0.15, linewidth=1)
+
+    events = [
+        {
+            "target": pd.Timestamp("2023-08-31"),
+            "text": (
+                "Авг 2023: экстренное повышение ключевой\n"
+                "ставки ЦБ с 8.5% до 12% (15 авг) на фоне\n"
+                "падения рубля до 100/USD. Equity emitents\n"
+                "дешевеют - DD падает, PD растёт."
+            ),
+            "color": "#1f77b4",
+            "xytext": (-170, 40),
+            "ha": "left",
+        },
+        {
+            "target": pd.Timestamp("2024-12-31"),
+            "text": (
+                "Янв 2025: ключевая ставка ЦБ 21% (пик цикла).\n"
+                "Ребалансировка после ралли IMOEX в дек 2024:\n"
+                "веса концентрируются в высоковолатильных\n"
+                "тикерах -> резкий скачок EL портфеля."
+            ),
+            "color": "#1f77b4",
+            "xytext": (-220, -10),
+            "ha": "left",
+        },
+        {
+            "target": pd.Timestamp("2025-03-31"),
+            "text": (
+                "Мар 2025: коррекция IMOEX (-10% от фев пика)\n"
+                "на срыве ожиданий мирных переговоров и\n"
+                "падении нефти к $70/bbl. ЦБ удерживает 21%.\n"
+                "Цикличные эмитенты (нефть, металлы) теряют\n"
+                "в стоимости -> DD сокращается, PD/EL растут."
+            ),
+            "color": "#1f77b4",
+            "xytext": (-255, 72),
+            "ha": "left",
+        },
+    ]
+
+    if ref_el is not None:
+        for ev in events:
+            x, y = _local_peak(ref_el, ev["target"], ev.get("peak_window", 1))
+            _annotate_event(ax2, x, y, ev["text"], ev["color"], ev["xytext"], ha=ev["ha"])
+
+    _draw_bt_line(ax)
+    ax.set_title("Реализованные EL и средневзвешенная PD портфеля, %", fontsize=14)
+    ax.set_xlabel("Дата", fontsize=12)
+    ax.grid(True, alpha=0.3)
+
+    lines_1, labels_1 = ax.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right", fontsize=9)
+    _rotate_xticks(ax)
+    plt.tight_layout()
+    save_path_2 = str(cfg.GRAPHS_DIR / "strategy_backtest_el_pd.png")
+    _finalize_plot(save_path_2, verbose)
+    log.info("Strategy EL/PD plot saved: %s", save_path_2)
 
 
 def plot_amount_strategy_comparison(
