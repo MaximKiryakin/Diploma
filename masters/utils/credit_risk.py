@@ -579,7 +579,7 @@ def plot_macro_forecast_fn(
     tail: int = 12,
     target_col: str = "DD",
     verbose: bool = False,
-    figsize: tuple = (12, 14),
+    figsize: tuple = (10, 5),
 ) -> "Portfolio":
     """Plots historical and forecasted macro and portfolio DD/PD.
 
@@ -593,7 +593,7 @@ def plot_macro_forecast_fn(
         tail: History months to show in plots.
         target_col: 'DD' or 'PD'.
         verbose: Whether to display the plot.
-        figsize: Figure size.
+        figsize: Per-figure size (each factor is rendered separately).
 
     Returns:
         Portfolio: self.
@@ -738,7 +738,7 @@ def compare_macro_models_fn(
     target_col: str = "DD",
     verbose: bool = False,
 ) -> "Portfolio":
-    """Computes MAE/RMSE/MAPE for macro models via walk-forward backtest.
+    """Computes MAE/RMSE/MAPE/sMAPE/ME for macro models via walk-forward.
 
     Args:
         self: Portfolio instance.
@@ -755,6 +755,11 @@ def compare_macro_models_fn(
 
     all_cols = cfg.MACRO_COLS + [target_col]
 
+    # Cross-sectional aggregation across tickers must be .mean() (matches
+    # predict_dd_fn's "pred_target = predicted_dd.mean()"). Time-axis
+    # resampling within a month is .last() to align with predict_dd_fn's
+    # end-of-month convention. Conflating the two yielded a single-ticker
+    # series and a 4x bias in DD MAE.
     port_target = self.d["portfolio"].groupby("date")[target_col].mean().reset_index()
     macro_df = (
         self.d["portfolio"][["date"] + cfg.MACRO_COLS]
@@ -762,7 +767,7 @@ def compare_macro_models_fn(
         .merge(port_target, on="date", how="left")
         .set_index("date")
         .resample("ME")
-        .mean()
+        .last()
         .dropna()
     )
     macro_df.index = macro_df.index.normalize() + pd.offsets.MonthEnd(0)
@@ -770,45 +775,82 @@ def compare_macro_models_fn(
     rows = []
     for m_type in models:
         errors = {col: [] for col in all_cols}
+        actuals = {col: [] for col in all_cols}
         for offset in range(n_months, 0, -1):
             fc = predict_macro_factors_fn(self, horizon=1, training_offset=offset, model_type=m_type)
             target_date = fc.index[-1]
 
+            # Reuse fc as macro_forecast to avoid a second macro refit
+            # inside predict_*_fn (same fix as in forecast_macro_fn).
             if target_col == "DD":
-                predict_dd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
+                predict_dd_fn(self, horizon=1, training_offset=offset, model_type=m_type, macro_forecast=fc)
                 pred_target = self.d["dd_forecast"]["predicted_dd"].mean()
             else:
-                predict_pd_fn(self, horizon=1, training_offset=offset, model_type=m_type)
+                predict_pd_fn(self, horizon=1, training_offset=offset, model_type=m_type, macro_forecast=fc)
                 pred_target = self.d["pd_forecast"]["predicted_pd"].mean()
 
             if target_date not in macro_df.index:
+                log.warning(
+                    "compare_macro_models: target_date %s missing from macro_df (model=%s, offset=%d) — skipped",
+                    target_date,
+                    m_type,
+                    offset,
+                )
                 continue
 
             actual = macro_df.loc[target_date]
             for col in cfg.MACRO_COLS:
                 if col in fc.columns:
                     errors[col].append(fc[col].values[0] - actual[col])
+                    actuals[col].append(actual[col])
             errors[target_col].append(pred_target - actual[target_col])
+            actuals[target_col].append(actual[target_col])
 
         for col in all_cols:
             errs = np.array(errors[col])
+            acts = np.array(actuals[col])
             if len(errs) == 0:
                 continue
-            actuals_abs = np.abs(macro_df[col].tail(n_months).values[: len(errs)])
-            mape_vals = np.abs(errs) / np.where(actuals_abs > 1e-8, actuals_abs, 1e-8)
+            denom_mape = np.where(np.abs(acts) > 1e-8, np.abs(acts), np.nan)
+            mape_vals = np.abs(errs) / denom_mape
+            # sMAPE — symmetric, bounded; mitigates blow-up for small actuals.
+            denom_smape = (np.abs(acts) + np.abs(acts - errs)) / 2.0
+            denom_smape = np.where(denom_smape > 1e-8, denom_smape, np.nan)
+            smape_vals = np.abs(errs) / denom_smape
             rows.append(
                 {
                     "Model": m_type,
                     "Variable": col,
                     "MAE": round(np.mean(np.abs(errs)), 6),
                     "RMSE": round(np.sqrt(np.mean(errs**2)), 6),
-                    "MAPE (%)": round(np.mean(mape_vals) * 100, 2),
+                    "ME": round(np.mean(errs), 6),
+                    "MAPE (%)": round(np.nanmean(mape_vals) * 100, 2),
+                    "sMAPE (%)": round(np.nanmean(smape_vals) * 100, 2),
                 }
             )
 
     comparison_df = pd.DataFrame(rows)
     self.d["macro_model_comparison"] = comparison_df
     log.log_dataframe(comparison_df, title="Macro Model Comparison (Walk-Forward)")
+
+    # Russian labels for plot axes; printed here so the log keeps the
+    # original English column names while the figure is fully Russian.
+    var_ru = {
+        "inflation": "Инфляция",
+        "interest_rate": "Ключевая ставка",
+        "unemployment_rate": "Безработица",
+        "rubusd_exchange_rate": "Курс RUB/USD",
+        "DD": "Дистанция до дефолта",
+        "PD": "Вероятность дефолта",
+    }
+    metric_ru = {
+        "MAE": "MAE — средняя абсолютная ошибка",
+        "RMSE": "RMSE — корень из СКО",
+        "ME": "ME — среднее смещение прогноза",
+        "MAPE (%)": "MAPE (%) — средняя относительная ошибка",
+        "sMAPE (%)": "sMAPE (%) — симметричная относительная ошибка",
+    }
+    log.info("Macro comparison label mapping (RU): variables=%s | metrics=%s", var_ru, metric_ru)
 
     if verbose:
         plots.plot_macro_model_comparison(comparison_df, verbose=verbose)

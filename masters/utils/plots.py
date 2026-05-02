@@ -515,78 +515,87 @@ def plot_macro_forecast(
     macro_df: pd.DataFrame,
     forecast_dfs: dict,
     tail: int = 0,
-    figsize: tuple = (12, 10),
+    figsize: tuple = (10, 5),
     verbose: bool = False,
 ) -> None:
-    """Plots historical and forecasted values for macro parameters and Portfolio PD.
+    """Plots historical and forecasted values for each macro factor.
+
+    Each factor is rendered as a separate figure and saved to
+    ``logs/graphs/macro_forecast_<factor>.png``.
 
     Args:
-        macro_df: Historical macro data (including PD).
+        macro_df: Historical macro data (including DD/PD).
         forecast_dfs: Dictionary mapping model labels to forecast DataFrames.
         tail: Number of last periods to show (0 = all).
-        figsize: Figure size.
-        verbose: Whether to display the plot interactively.
+        figsize: Per-figure size.
+        verbose: Whether to display the figures interactively.
     """
-    factors = list(macro_df.columns)
-    n_factors = len(factors)
+    factor_titles = {
+        "inflation": "Инфляция",
+        "interest_rate": "Ключевая ставка",
+        "unemployment_rate": "Безработица",
+        "rubusd_exchange_rate": "Курс RUB/USD",
+        "DD": "Дистанция до дефолта (DD) портфеля",
+        "PD": "Вероятность дефолта (PD) портфеля, %",
+    }
+    model_colors = {
+        "var": "darkred",
+        "sarimax": "darkgreen",
+        "prophet": "orange",
+    }
+    fallback_colors = ["purple", "brown", "teal", "magenta"]
 
-    fig, axes = plt.subplots(n_factors, 1, figsize=figsize, sharex=True)
-    if n_factors == 1:
-        axes = [axes]
-
-    colors = ["darkred", "darkgreen", "orange", "purple", "brown"]
-
-    for i, factor in enumerate(factors):
-        ax = axes[i]
+    for factor in macro_df.columns:
         is_pd = factor == "PD"
-        is_dd = factor == "DD"
+
+        fig, ax = plt.subplots(figsize=figsize)
 
         plot_df = macro_df.tail(tail) if tail > 0 else macro_df
-
         fact_vals = plot_df[factor] * 100 if is_pd else plot_df[factor]
-        ax.plot(plot_df.index, fact_vals, label="Fact", color="royalblue", linewidth=2.5)
+        ax.plot(plot_df.index, fact_vals, label="Факт", color="royalblue", linewidth=2.5)
 
         for idx, (label, forecast_df) in enumerate(forecast_dfs.items()):
             if factor not in forecast_df.columns:
                 continue
 
-            color = colors[idx % len(colors)]
+            color = model_colors.get(label.lower(), fallback_colors[idx % len(fallback_colors)])
             first_fc_date = forecast_df.index[0]
             history_before_fc = macro_df[macro_df.index < first_fc_date]
 
-            fc_vals_raw = list(forecast_df[factor])
-            fc_vals_scaled = [v * 100 for v in fc_vals_raw] if is_pd else fc_vals_raw
+            fc_raw = list(forecast_df[factor])
+            fc_scaled = [v * 100 for v in fc_raw] if is_pd else fc_raw
 
             if not history_before_fc.empty:
                 fc_dates = [history_before_fc.index[-1]] + list(forecast_df.index)
                 hist_val = history_before_fc[factor].iloc[-1]
-                fc_vals = [hist_val * 100 if is_pd else hist_val] + fc_vals_scaled
+                fc_vals = [hist_val * 100 if is_pd else hist_val] + fc_scaled
             else:
                 fc_dates = list(forecast_df.index)
-                fc_vals = fc_vals_scaled
+                fc_vals = fc_scaled
 
-            ax.plot(fc_dates, fc_vals, label=f"FC: {label}", color=color, linestyle="--", linewidth=1.5)
-            ax.scatter(forecast_df.index, fc_vals_scaled, color=color, s=20)
+            ax.plot(
+                fc_dates,
+                fc_vals,
+                label=f"Прогноз: {label.upper()}",
+                color=color,
+                linestyle="--",
+                linewidth=1.8,
+            )
+            ax.scatter(forecast_df.index, fc_scaled, color=color, s=30, zorder=3)
 
-        if is_pd:
-            title = "Portfolio Average PD (%)"
-        elif is_dd:
-            title = "Portfolio Average Distance to Default (DD)"
-        else:
-            title = f"Macro Factor: {factor}"
-
-        ax.set_title(title, fontsize=12, fontweight="bold" if (is_pd or is_dd) else "normal")
-        ax.legend(loc="best", fontsize=9)
+        ax.set_title(factor_titles.get(factor, factor), fontsize=14)
+        ax.legend(loc="best", fontsize=11)
         ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Дата", fontsize=11)
+        ax.tick_params(axis="both", labelsize=10)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        plt.setp(ax.get_xticklabels(), rotation=90, ha="center")
 
-    plt.xlabel("Date", fontsize=10)
-    plt.xticks(rotation=90)
-    plt.tight_layout()
+        plt.tight_layout()
 
-    save_path = str(cfg.GRAPHS_DIR / "macro_pd_comparison.png")
-    _finalize_plot(save_path, verbose)
-    log.info("Macro comparison plot saved: %s", save_path)
+        save_path = str(cfg.GRAPHS_DIR / f"macro_forecast_{factor}.png")
+        _finalize_plot(save_path, verbose)
+        log.info("Macro forecast plot saved | factor=%s | path=%s", factor, save_path)
 
 
 def _plot_metric_forecast(
@@ -1036,36 +1045,108 @@ def plot_amount_strategy_comparison(
 def plot_macro_model_comparison(
     comparison_df: pd.DataFrame,
     verbose: bool = False,
-    figsize: tuple = (14, 6),
+    figsize: tuple | None = None,
+    value_fmt: str = "%.3f",
 ) -> None:
-    """Plots a grouped bar chart comparing macro model accuracy metrics.
+    """Plots a grid of horizontal bar charts comparing macro model metrics.
+
+    Layout: rows = variables, columns = metrics. Each cell has its own
+    independent X-axis so small values are not dwarfed by large ones.
+    Each bar is labelled in Russian inside the bar (model name, left-
+    aligned, bold) and on the right edge with the numeric value.
 
     Args:
-        comparison_df: DataFrame with columns [Model, Variable, MAE, RMSE, MAPE (%)].
+        comparison_df: DataFrame with columns
+            [Model, Variable, MAE, RMSE, MAPE (%), ...].
         verbose: Whether to display the plot interactively.
-        figsize: Figure size.
+        figsize: Figure size; if None, sized as (22, 4 * n_vars).
+        value_fmt: printf-style format for numeric value labels.
     """
     if comparison_df.empty:
         log.warning("Macro model comparison DataFrame is empty.")
         return
 
-    models = comparison_df["Model"].unique()
+    var_ru = {
+        "inflation": "Инфляция",
+        "interest_rate": "Ключевая ставка",
+        "unemployment_rate": "Безработица",
+        "rubusd_exchange_rate": "Курс RUB/USD",
+        "DD": "Дистанция до дефолта",
+        "PD": "Вероятность дефолта",
+    }
+    metric_titles = {
+        "MAE": "Средняя абсолютная ошибка (MAE)",
+        "RMSE": "Корень из среднеквадратичной ошибки (RMSE)",
+        "MAPE (%)": "Средняя абсолютная процентная ошибка (MAPE, %)",
+    }
+    metrics = [m for m in ["MAE", "RMSE", "MAPE (%)"] if m in comparison_df.columns]
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
-    metrics = ["MAE", "RMSE", "MAPE (%)"]
-    titles = ["Mean Absolute Error", "Root Mean Squared Error", "Mean Absolute Percentage Error (%)"]
+    models = list(comparison_df["Model"].unique())
+    variables = list(comparison_df["Variable"].unique())
+    n_models = len(models)
+    n_vars = len(variables)
+    n_metrics = len(metrics)
+    color_map = {m: c for m, c in zip(models, plt.cm.tab10.colors[:n_models])}
 
-    for ax_idx, (metric, title) in enumerate(zip(metrics, titles)):
-        ax = axes[ax_idx]
-        pivot = comparison_df.pivot(index="Variable", columns="Model", values=metric)
-        pivot = pivot.reindex(columns=models)
-        pivot.plot(kind="bar", ax=ax, rot=30, width=0.7)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.set_ylabel(metric)
-        ax.legend(title="Model", fontsize=8)
-        ax.grid(True, alpha=0.3, axis="y")
+    if figsize is None:
+        figsize = (22, 4.0 * n_vars)
 
-    plt.suptitle("Macro Forecast Model Comparison (Walk-Forward)", fontsize=14, fontweight="bold", y=1.02)
+    fig, axes = plt.subplots(n_vars, n_metrics, figsize=figsize, squeeze=False)
+
+    for r, var in enumerate(variables):
+        for c, metric in enumerate(metrics):
+            ax = axes[r, c]
+            sub = comparison_df[comparison_df["Variable"] == var].set_index("Model").reindex(models)
+            values = sub[metric].values.astype(float)
+            ypos = np.arange(n_models)
+            bars = ax.barh(
+                ypos,
+                values,
+                color=[color_map[m] for m in models],
+                edgecolor="white",
+                height=0.7,
+            )
+            xmax = np.nanmax(values) if np.isfinite(values).any() else 1.0
+            inset = xmax * 0.02 if xmax > 0 else 0.0
+            for rect, val, model in zip(bars, values, models):
+                w = rect.get_width()
+                if np.isfinite(val) and w > 0:
+                    ax.text(
+                        inset,
+                        rect.get_y() + rect.get_height() / 2,
+                        model.upper(),
+                        ha="left",
+                        va="center",
+                        fontsize=18,
+                        color="white",
+                        fontweight="bold",
+                    )
+            ax.bar_label(bars, fmt=value_fmt, padding=4, fontsize=17)
+
+            ax.set_yticks(ypos)
+            ax.set_yticklabels([])
+            ax.invert_yaxis()
+            ax.grid(True, alpha=0.3, axis="x")
+            ax.tick_params(axis="x", labelsize=12)
+            if r == 0:
+                ax.set_title(metric_titles.get(metric, metric), fontsize=17)
+            if c == 0:
+                ax.set_ylabel(
+                    var_ru.get(var, var),
+                    fontsize=20,
+                    rotation=90,
+                    ha="center",
+                    va="center",
+                    labelpad=16,
+                )
+            if np.isfinite(values).any() and xmax > 0:
+                ax.set_xlim(0, xmax * 1.22)
+
+    plt.suptitle(
+        "Сравнение макропрогнозных моделей (walk-forward)",
+        fontsize=26,
+        y=1.005,
+    )
     plt.tight_layout()
 
     save_path = str(cfg.GRAPHS_DIR / "macro_model_comparison.png")
