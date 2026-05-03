@@ -1229,13 +1229,18 @@
 /masters
 |-- /data                   # Source data and local dumps
 |   |-- /backup             # Cached quotes and multipliers
-|   |-- /macro              # Macroeconomic indicators (CSV/XLSX)
-|   |-- /multiplicators     # Supplementary issuer data
+|   |-- /macro              # Macroeconomic indicators (CSV)
+|   |-- /multiplicators     # Supplementary issuer multipliers
 |-- /utils                  # Computational modules and system core
-|   |-- load_data.py        # ETL processes and API integration
-|   |-- portfolio.py        # Portfolio class (Merton, optimization)
+|   |-- portfolio.py        # Portfolio class (Merton, optimization, backtest)
+|   |-- load_data.py        # ETL: API integration and data loading
 |   |-- plots.py            # Generation of plots and reports
+|   |-- optimization.py     # Portfolio optimization algorithms
+|   |-- credit_risk.py      # Credit risk metrics (EL, CVaR, RiskParity)
+|   |-- data_layer.py       # Data access and caching layer
 |   |-- logger.py           # Structured logging system
+|   |-- config.py           # Global configuration and constants
+|   |-- setup.py            # Environment setup utilities
 |-- /logs                   # Program output and results
 |   |-- /graphs             # Generated visualizations
 |   |-- app.log             # Textual execution log
@@ -1249,54 +1254,53 @@
 
 	\begin{figure}[h!]
 		\centering
-		\resizebox{\textwidth}{!}{%
+		\resizebox{0.95\textwidth}{!}{%
 		\begin{tikzpicture}
 			% ---- Data Sources (y=8) ----
 			\node[ext] (moex)    at (-0.4, 8) {MOEX\\Котировки};
 			\node[ext] (rosstat) at (3.55, 8) {Росстат\\Инфляция, Безработица};
 			\node[ext] (cbr)     at (8.0, 8) {ЦБ~РФ\\Ставка, USD/RUB};
-			\node[db]  (backup)  at (11.4, 8) {CSV\\Backup};
-			% ---- ETL Layer (y=6.2) ----
+			\node[db]  (backup)  at (11.4, 8) {CSV\\Архив};
+			% ---- ETL Layer (y=6.0) ----
 			\node[server, minimum width=14cm] (etl) at (5.25, 6.0)
-				{\textbf{ETL-блок}\\
-				 \texttt{load\_stock\_data},\ \texttt{load\_multipliers},\ \texttt{load\_macro\_data}};
+				{\textbf{Загрузка данных}\\
+				 котировки, мультипликаторы, макропоказатели};
 			% ---- Feature Engineering (y=4.5) ----
-			\node[server, minimum width=14cm] (feat) at (5.25, 4.5)
+			\node[server, minimum width=14cm] (feat) at (5.25, 4.2)
 				{\textbf{Предобработка данных}\\
-				 \texttt{add\_dynamic\_features}\ $\to$\ \texttt{create\_portfolio}};
-			% ---- Model Layer (y=2.8) ----
-			\node[server, minimum width=5.0cm] (merton) at (0.78, 2.5)
-				{\texttt{add\_merton\_pd}\\Модель Мертона\\$PD_i$,\ $DD_i$};
-			\node[server, minimum width=5.0cm] (macro)  at (9.45, 2.5)
-				{\texttt{predict\_dd}\\VAR / SARIMAX / Prophet\\$\widehat{DD}_i(t+h)$};
-			% ---- Optimization (y=1.0) ----
-			\node[server, minimum width=5.0cm] (optim)   at (0.78, 0.2)
-				{\texttt{optimize\_portfolio}\\SLSQP:\ $\min \rho(w)$};
-			\node[server, minimum width=5.0cm] (metrics) at (9.65, 0.2)
-				{\texttt{calc\_portfolio\_metrics}\\Sharpe,\ CVaR,\ MDD};
-			% ---- Backtesting (y=-0.5) ----
-			\node[server, minimum width=9cm] (backtest) at (5.25, -1.5)
-				{\texttt{backtest\_portfolio\_strategies}:\ walk-forward};
-			% ---- Output (y=-2.2) ----
-			\node[server, minimum width=4.0cm] (plots) at (2.5, -4.2)
-				{\texttt{plots.py}\\Визуализация};
-			\node[db] (logs) at (8.5, -4.2)
-				{\texttt{app.log}\\logs/graphs};
+				 расчёт волатильности, сборка мастер-таблицы};
+			% ---- Model Layer (y=2.5) ----
+			\node[server, minimum width=5.5cm] (merton) at (1.0, 2.0)
+				{\textbf{Модель Мертона}\\оценка $V_A$,\ $\sigma_A$\\$PD_i$,\ $DD_i$};
+			\node[server, minimum width=5.5cm] (macro)  at (9.45, 2.0)
+				{\textbf{Прогноз $DD$}\\VAR / SARIMAX / Prophet\\$\widehat{DD}_i(t{+}h)$};
+			% ---- Optimization (y=0.2) ----
+			\node[server, minimum width=5.5cm] (optim)   at (1.0, -0.1)
+				{\textbf{Оптимизация портфеля}\\SLSQP:\ $\min_w\,\rho(w)$};
+			\node[server, minimum width=5.5cm] (metrics) at (9.45, -0.1)
+				{\textbf{Метрики портфеля}\\Шарп,\ CVaR,\ MDD};
+			% ---- Backtesting (y=-1.5) ----
+			\node[server, minimum width=14cm] (backtest) at (5.25, -2.0)
+				{\textbf{Бэктестинг стратегий}:\ скользящее окно};
+			% ---- Output (y=-4.2) ----
+			\node[server, minimum width=4.0cm] (plots) at (0.3, -4.2)
+				{\textbf{Визуализация}\\графики, отчёты};
+			\node[db] (logs) at (11.3, -4.2)
+				{Логи и\\графики};
 			% ---- Arrows ----
-			\draw[arr] (moex.south)    -- (etl.north);
-			\draw[arr] (rosstat.south) -- (etl.north);
-			\draw[arr] (cbr.south)     -- (etl.north);
-			\draw[arr] (backup.south)  -- (etl.north);
+			\draw[arr] (moex.south)    |- (etl.north);
+			\draw[arr] (rosstat.south) |- (etl.north);
+			\draw[arr] (cbr.south)     |- (etl.north);
+			\draw[arr] (backup.south)  |- (etl.north);
 			\draw[arr] (etl.south)  -- (feat.north);
-			\draw[arr] (feat.south) -- (merton.north);
-			\draw[arr] (feat.south) -- (macro.north);
+			\draw[arr] (feat.south) |- (merton.east);
+			\draw[arr] (feat.south) |- (macro.west);
 			\draw[arr] (merton.south) -- (optim.north);
 			\draw[arr] (macro.south)  -- (metrics.north);
-			\draw[arr] (optim.south)   to[out=-60,  in=120] (backtest.north);
-			\draw[arr] (metrics.south) to[out=-120, in=60]  (backtest.north);
-			\draw[arr] (backtest.south) to[out=-120, in=90] (plots.north);
-			\draw[arr] (backtest.south) to[out=-60,  in=90] (logs.north);
-
+			\draw[arr] (optim.east)  -| (backtest.north);
+			\draw[arr] (metrics.west) -|  (backtest.north);
+			\draw[arr] (backtest.south) |- (plots.east);
+			\draw[arr] (backtest.south) |- (logs.west);
 		\end{tikzpicture}}
 		\caption{Архитектура вычислительного конвейера системы динамического управления
 		         кредитным портфелем.}
@@ -1690,7 +1694,7 @@ Start Date ..... End Date
 
 	\begin{figure}[h!]
 		\centering
-		\includegraphics[width=0.95\textwidth]{../logs/graphs/strategy_backtest_el_pd.png}
+		\includegraphics[width=1.00\textwidth]{../logs/graphs/strategy_backtest_el_pd.png}
 		\caption{Динамика средневзвешенных по портфелю $EL_t$ и $PD_t$ по стратегиям
 			(weight-based бэктест).}
 		\label{fig:strategy_el_pd}
