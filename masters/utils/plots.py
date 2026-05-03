@@ -684,29 +684,59 @@ def plot_dd_forecast(forecast_df: pd.DataFrame, figsize: tuple = (12, 6), verbos
     _plot_metric_forecast(forecast_df, metric="dd", figsize=figsize, verbose=verbose)
 
 
-def plot_portfolio_allocation(weights: pd.Series, figsize: tuple = (10, 6), verbose: bool = False) -> None:
-    """Plots a bar chart of portfolio weights.
+def plot_portfolio_allocation(weights: pd.Series, figsize: tuple = (14, 6), verbose: bool = False) -> None:
+    """Plots a horizontal bar chart of portfolio weights with company names inside bars.
+
+    Style mirrors plot_macro_model_comparison: bars sorted descending, company
+    name in white bold inside the bar, numeric weight at the right edge. Uses a
+    single solid color (no gradient) and a wide rectangular layout.
 
     Args:
         weights: Optimized weights by ticker.
-        figsize: Figure size.
+        figsize: Base figure size; height auto-scales by number of positions.
         verbose: Whether to display the plot interactively.
     """
     if weights.empty:
         log.warning("Weights series is empty. Cannot plot allocation.")
         return
 
+    from utils.LabelsDict import get_company_name
+
     df = weights[weights > 0.001].sort_values(ascending=False).reset_index()
     df.columns = ["ticker", "weight"]
+    df["name"] = df["ticker"].map(get_company_name)
 
-    plt.figure(figsize=figsize, dpi=150)
-    sns.barplot(data=df, x="ticker", y="weight", palette="viridis")
+    n = len(df)
+    fig, ax = plt.subplots(figsize=(figsize[0], max(5, 0.45 * n + 1.0)), dpi=150)
 
-    plt.title("Optimized Portfolio Allocation", fontsize=14, pad=15)
-    plt.ylabel("Weight", fontsize=12)
-    plt.xlabel("Ticker", fontsize=12)
-    plt.grid(True, axis="y", alpha=0.3)
-    plt.xticks(rotation=90)
+    bar_color = "#2E7D9E"
+    ypos = np.arange(n)
+    bars = ax.barh(ypos, df["weight"].values * 100, color=bar_color, edgecolor="white", height=0.75)
+
+    xmax = float(df["weight"].max() * 100) if n else 1.0
+    inset = xmax * 0.02 if xmax > 0 else 0.0
+    for rect, name in zip(bars, df["name"].values):
+        ax.text(
+            inset,
+            rect.get_y() + rect.get_height() / 2,
+            name,
+            ha="left",
+            va="center",
+            fontsize=14,
+            color="white",
+            fontweight="bold",
+        )
+    ax.bar_label(bars, fmt="%.2f%%", padding=4, fontsize=12)
+
+    ax.set_yticks(ypos)
+    ax.set_yticklabels([])
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3, axis="x")
+    ax.set_title(
+        "Структура оптимизированного портфеля (Optimized Portfolio Allocation)", fontsize=15, fontweight="bold", pad=12
+    )
+    ax.set_xlabel("Доля в портфеле, % (Weight)", fontsize=12)
+    ax.set_xlim(0, xmax * 1.18 if xmax > 0 else 1.0)
     plt.tight_layout()
 
     save_path = str(cfg.GRAPHS_DIR / "portfolio_allocation.png")
@@ -940,9 +970,14 @@ def plot_amount_strategy_comparison(
 ) -> None:
     """Plots multi-strategy comparison for amount-based backtests.
 
-    Produces two figures:
-    1. Time-series: cumulative net income, realized EL, credit income per strategy.
-    2. Bar chart: key summary metrics (RAROC, EL, Vol, Net Income) across strategies.
+    Produces four figures saved as PNGs:
+        1. Cumulative net income time-series.
+        2. Monthly realized expected loss (EL) time-series.
+        3. Monthly credit income time-series.
+        4. Horizontal bar chart of summary metrics (labels inside bars).
+
+    All time-series share figsize, monthly date ticks rotated 90 degrees,
+    and bilingual RU/EN axis labels.
 
     Args:
         all_backtests: Dict mapping strategy name -> backtest DataFrame.
@@ -965,133 +1000,210 @@ def plot_amount_strategy_comparison(
         "risk_parity": "Risk Parity",
     }
 
-    # --- Figure 1: Time-series (3 subplots) ---
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(13, 14), sharex=True)
+    legend_fs = 13
+    title_fs = 15
+    axis_fs = 12
+    tick_fs = 13
 
+    def _slice(df: pd.DataFrame) -> pd.DataFrame:
+        return df.tail(tail) if tail > 0 else df
+
+    def _setup_dates(ax: plt.Axes) -> None:
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        for label in ax.get_xticklabels():
+            label.set_rotation(90)
+            label.set_horizontalalignment("center")
+            label.set_fontsize(tick_fs)
+
+    last_bt = list(all_backtests.values())[-1]
+    pp = _slice(last_bt).copy()
+    pp["Passive_CumNet"] = (1 + pp["Passive_Net"]).cumprod() - 1
+
+    # --- Figure 1: Cumulative net income ---
+    fig, ax = plt.subplots(figsize=(13, 6))
     for strat_name, bt_df in all_backtests.items():
-        plot_df = bt_df.tail(tail) if tail > 0 else bt_df
-        plot_df = plot_df.copy()
-        plot_df["Active_CumNet"] = (1 + plot_df["Active_Net"]).cumprod() - 1
-        color = strategy_colors.get(strat_name, None)
-        label = strategy_labels.get(strat_name, strat_name)
-
-        ax1.plot(
-            plot_df.index,
-            plot_df["Active_CumNet"] * 100,
-            label=label,
+        p = _slice(bt_df).copy()
+        p["Active_CumNet"] = (1 + p["Active_Net"]).cumprod() - 1
+        ax.plot(
+            p.index,
+            p["Active_CumNet"] * 100,
+            label=strategy_labels.get(strat_name, strat_name),
             linewidth=2.5,
             marker="o",
-            markersize=3,
-            color=color,
+            markersize=4,
+            color=strategy_colors.get(strat_name),
         )
-        ax2.plot(
-            plot_df.index,
-            plot_df["Active_EL"] * 100,
-            label=f"{label}",
-            linewidth=2,
-            color=color,
-        )
-        ax3.plot(
-            plot_df.index,
-            plot_df["Active_Credit_Income"] * 100,
-            label=f"{label}",
-            linewidth=2,
-            color=color,
-        )
+    ax.plot(
+        pp.index,
+        pp["Passive_CumNet"] * 100,
+        label="Пассивная (Buy-and-Hold)",
+        linewidth=2.2,
+        linestyle="--",
+        color="gray",
+        alpha=0.85,
+    )
+    ax.set_title(
+        "Накопленный чистый доход портфеля (Cumulative Net Income)",
+        fontsize=title_fs,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Дата (Date)", fontsize=axis_fs)
+    ax.set_ylabel("Накопленный чистый доход, % (Cumulative Net Income)", fontsize=axis_fs)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=legend_fs, framealpha=0.9)
+    _setup_dates(ax)
+    plt.tight_layout()
+    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_cumret.png")
+    _finalize_plot(save_path, verbose)
+    log.info("Amount strategy cumulative net income plot saved: %s", save_path)
 
-    # Passive baseline from last strategy backtest
-    last_bt = list(all_backtests.values())[-1]
-    plot_passive = last_bt.tail(tail) if tail > 0 else last_bt
-    plot_passive = plot_passive.copy()
-    plot_passive["Passive_CumNet"] = (1 + plot_passive["Passive_Net"]).cumprod() - 1
-
-    ax1.plot(
-        plot_passive.index,
-        plot_passive["Passive_CumNet"] * 100,
-        label="Passive (Equal)",
+    # --- Figure 2: Realized EL ---
+    fig, ax = plt.subplots(figsize=(13, 6))
+    for strat_name, bt_df in all_backtests.items():
+        p = _slice(bt_df)
+        ax.plot(
+            p.index,
+            p["Active_EL"] * 100,
+            label=strategy_labels.get(strat_name, strat_name),
+            linewidth=2.2,
+            color=strategy_colors.get(strat_name),
+        )
+    ax.plot(
+        pp.index,
+        pp["Passive_EL"] * 100,
+        label="Пассивная (Buy-and-Hold)",
         linewidth=2,
         linestyle="--",
         color="gray",
-        alpha=0.8,
     )
-    ax2.plot(
-        plot_passive.index,
-        plot_passive["Passive_EL"] * 100,
-        label="Passive",
-        color="gray",
-        linestyle="--",
+    ax.set_title(
+        "Месячные ожидаемые потери (Monthly Realized Expected Loss, EL)",
+        fontsize=title_fs,
+        fontweight="bold",
     )
-    ax3.plot(
-        plot_passive.index,
-        plot_passive["Passive_Credit_Income"] * 100,
-        label="Passive",
-        color="gray",
-        linestyle="--",
-    )
-
-    ax1.set_title("Cumulative Net Income (Market Return + Credit Income - EL)", fontsize=13, fontweight="bold")
-    ax1.set_ylabel("Cumulative Net Income (%)", fontsize=11)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="upper left")
-
-    ax2.set_title("Monthly Realized Expected Loss (EL)", fontsize=13, fontweight="bold")
-    ax2.set_ylabel("EL (%)", fontsize=11)
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper left")
-
-    ax3.set_title("Monthly Credit Income (Interest Rate Revenue)", fontsize=13, fontweight="bold")
-    ax3.set_ylabel("Credit Income (%)", fontsize=11)
-    ax3.grid(True, alpha=0.3)
-    ax3.legend(loc="upper left")
-
-    plt.xlabel("Date", fontsize=11)
-    plt.xticks(rotation=45)
+    ax.set_xlabel("Дата (Date)", fontsize=axis_fs)
+    ax.set_ylabel("Ожидаемые потери, % (Expected Loss)", fontsize=axis_fs)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=legend_fs, framealpha=0.9)
+    _setup_dates(ax)
     plt.tight_layout()
-
-    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_timeseries.png")
+    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_el.png")
     _finalize_plot(save_path, verbose)
-    log.info("Amount strategy time-series plot saved: %s", save_path)
+    log.info("Amount strategy EL plot saved: %s", save_path)
 
-    # --- Figure 2: Bar chart of summary metrics ---
+    # --- Figure 3: Credit income ---
+    fig, ax = plt.subplots(figsize=(13, 6))
+    for strat_name, bt_df in all_backtests.items():
+        p = _slice(bt_df)
+        ax.plot(
+            p.index,
+            p["Active_Credit_Income"] * 100,
+            label=strategy_labels.get(strat_name, strat_name),
+            linewidth=2.2,
+            color=strategy_colors.get(strat_name),
+        )
+    ax.plot(
+        pp.index,
+        pp["Passive_Credit_Income"] * 100,
+        label="Пассивная (Buy-and-Hold)",
+        linewidth=2,
+        linestyle="--",
+        color="gray",
+    )
+    ax.set_title(
+        "Месячный кредитный доход (Monthly Credit Income)",
+        fontsize=title_fs,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Дата (Date)", fontsize=axis_fs)
+    ax.set_ylabel("Кредитный доход, % (Credit Income)", fontsize=axis_fs)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=legend_fs, framealpha=0.9)
+    _setup_dates(ax)
+    plt.tight_layout()
+    save_path = str(cfg.GRAPHS_DIR / "amount_strategy_credit_income.png")
+    _finalize_plot(save_path, verbose)
+    log.info("Amount strategy credit income plot saved: %s", save_path)
+
+    # --- Figure 4: Horizontal bar chart of summary metrics ---
     if comparison_df is None or comparison_df.empty:
         return
 
-    metrics_to_plot = ["Avg Net Income (%)", "Avg Realized EL (%)", "Realized Vol (%)", "RAROC (%)"]
+    metrics_to_plot = ["Avg Net Income (%)", "Avg Realized EL (%)", "Realized Vol (%)", "Sharpe (Net)"]
+    metrics_ru = {
+        "Avg Net Income (%)": "Средний чистый доход (%)\n(Avg Net Income)",
+        "Avg Realized EL (%)": "Средний реализованный EL (%)\n(Avg Realized EL)",
+        "Realized Vol (%)": "Реализованная волатильность (%)\n(Realized Vol)",
+        "Sharpe (Net)": "Sharpe чистого дохода\n(Sharpe Net)",
+    }
     available_metrics = [m for m in metrics_to_plot if m in comparison_df.columns]
     if not available_metrics:
         return
 
     n_metrics = len(available_metrics)
-    fig, axes = plt.subplots(1, n_metrics, figsize=(4 * n_metrics, 5))
-    if n_metrics == 1:
-        axes = [axes]
+    strategies_ordered = list(comparison_df.index)
+    n_strats = len(strategies_ordered)
 
-    bar_colors = []
-    for strat in comparison_df.index:
-        bar_colors.append(strategy_colors.get(strat, "gray"))
+    display_labels = {
+        "mean_el": "Mean-EL",
+        "cvar": "CVaR",
+        "risk_parity": "Risk Parity",
+        "passive (equal, buy-and-hold)": "Passive (B&H)",
+    }
+
+    fig, axes = plt.subplots(
+        1,
+        n_metrics,
+        figsize=(5.0 * n_metrics, 1.0 + 0.9 * n_strats),
+        squeeze=False,
+    )
+    axes = axes[0]
 
     for ax, metric in zip(axes, available_metrics):
-        values = comparison_df[metric]
-        bars = ax.bar(range(len(values)), values, color=bar_colors, edgecolor="black", linewidth=0.5)
-        ax.set_title(metric, fontsize=11, fontweight="bold")
-        ax.set_xticks(range(len(values)))
-        labels = [strategy_labels.get(s, s) for s in comparison_df.index]
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
-        ax.grid(True, alpha=0.2, axis="y")
+        values = comparison_df[metric].values.astype(float)
+        ypos = np.arange(n_strats)
+        bar_colors = [strategy_colors.get(s, "gray") for s in strategies_ordered]
+        bars = ax.barh(ypos, values, color=bar_colors, edgecolor="white", height=0.7)
 
-        for bar, val in zip(bars, values):
+        finite = values[np.isfinite(values)]
+        xmax = float(np.nanmax(finite)) if finite.size else 1.0
+        xmin = float(np.nanmin(finite)) if finite.size else 0.0
+        span = xmax - min(xmin, 0.0) if xmax != xmin else max(abs(xmax), 1.0)
+        inset = (span if span > 0 else 1.0) * 0.02
+
+        for rect, val, strat in zip(bars, values, strategies_ordered):
+            if not np.isfinite(val):
+                continue
+            label_x = inset if val >= 0 else -inset
+            ha = "left" if val >= 0 else "right"
             ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height(),
-                f"{val:.3f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
+                label_x,
+                rect.get_y() + rect.get_height() / 2,
+                display_labels.get(strat, strat),
+                ha=ha,
+                va="center",
+                fontsize=14,
+                color="white",
+                fontweight="bold",
             )
+        ax.bar_label(bars, fmt="%.3f", padding=4, fontsize=12)
 
-    plt.suptitle("Amount-Based Strategy Comparison: Key Metrics", fontsize=14, fontweight="bold")
+        ax.set_yticks(ypos)
+        ax.set_yticklabels([])
+        ax.invert_yaxis()
+        ax.grid(True, alpha=0.3, axis="x")
+        ax.set_title(metrics_ru.get(metric, metric), fontsize=12, fontweight="bold")
+        if xmax > 0:
+            ax.set_xlim(min(xmin, 0.0), xmax * 1.25)
+
+    plt.suptitle(
+        "Сравнение стратегий: ключевые метрики (Strategy Comparison: Key Metrics)",
+        fontsize=14,
+        fontweight="bold",
+        y=1.02,
+    )
     plt.tight_layout()
-
     save_path = str(cfg.GRAPHS_DIR / "amount_strategy_metrics.png")
     _finalize_plot(save_path, verbose)
     log.info("Amount strategy metrics plot saved: %s", save_path)

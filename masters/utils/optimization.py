@@ -562,14 +562,16 @@ def backtest_portfolio_strategies_fn(
         all_backtests[strat] = backtest_df
 
         bt_only = backtest_df.tail(n_months)
-        # Fix #7: add Sharpe (annualised) and RAROC = Total Return / Avg Realized EL.
+        # Risk-adjusted metric: annualised Sharpe on Active_Return.
+        # The previous "RAROC = Total Return / Avg Realized EL" was dimensionally
+        # inconsistent (a return-to-loss ratio, sign-flips on negative periods)
+        # and was dropped to keep this table comparable with compare_amount_strategies.
         ann = float(np.sqrt(cfg.MONTHS_PER_YEAR))
         mean_a = float(bt_only["Active_Return"].mean())
         std_a = float(bt_only["Active_Return"].std())
         sharpe_a = round((mean_a / std_a) * ann, 4) if std_a > 0 else float("nan")
         total_ret_a = float((1 + bt_only["Active_Return"]).prod() - 1)
         avg_el_a = float(bt_only["Active_EL"].mean())
-        raroc_a = round(total_ret_a / avg_el_a, 4) if avg_el_a > 0 else float("nan")
         comparison_rows.append(
             {
                 "Strategy": strat,
@@ -577,7 +579,6 @@ def backtest_portfolio_strategies_fn(
                 "Avg Realized EL (%)": round(avg_el_a * 100, 6),
                 "Realized Vol (%)": round(std_a * ann * 100, 4),
                 "Sharpe": sharpe_a,
-                "RAROC": raroc_a,
                 "Total TC (%)": round(bt_only["TC"].sum() * 100, 4),
                 "Rebalances": int(bt_only["Rebalanced"].sum()),
                 "Avg Turnover (%)": round(bt_only["Turnover"].mean() * 100, 4),
@@ -598,7 +599,6 @@ def backtest_portfolio_strategies_fn(
     sharpe_p = round((mean_p / std_p) * ann_p, 4) if std_p > 0 else float("nan")
     total_ret_p = float((1 + bt_passive["Passive_Return"]).prod() - 1)
     avg_el_p = float(bt_passive["Passive_EL"].mean())
-    raroc_p = round(total_ret_p / avg_el_p, 4) if avg_el_p > 0 else float("nan")
     comparison_rows.append(
         {
             "Strategy": "passive (equal, buy-and-hold)",
@@ -606,7 +606,6 @@ def backtest_portfolio_strategies_fn(
             "Avg Realized EL (%)": round(avg_el_p * 100, 6),
             "Realized Vol (%)": round(std_p * ann_p * 100, 4),
             "Sharpe": sharpe_p,
-            "RAROC": raroc_p,
             "Total TC (%)": 0.0,
             "Rebalances": 0,
             "Avg Turnover (%)": 0.0,
@@ -727,6 +726,31 @@ def optimize_portfolio_with_amounts_fn(
 
     # Decision variable z = x/budget: rescales gradients from O(rate/budget)~5e-12
     # to O(rate)~0.1, which is required for SLSQP to differentiate strategies.
+    # Fix #8: cross-strategy risk-term normalization.
+    # The raw magnitudes of port_vol (~0.2), cvar_val (~0.2) and risk_parity
+    # diff_sum (~1e-3) differ by orders of magnitude, so a single lambda_vol
+    # is not commensurable across strategies. Compute the risk term at uniform
+    # weights once and divide subsequent objective evaluations by it. After
+    # normalization every strategy starts with risk_term ~ 1.0 and lambda_vol
+    # has a comparable meaning across mean_el / cvar / risk_parity.
+    w0 = np.full(n, 1.0 / n)
+    if strategy == "mean_el":
+        risk_term_baseline = float(np.sqrt(w0 @ cov_matrix @ w0)) + cfg.EPSILON
+    elif strategy == "cvar":
+        losses0 = -(adjusted_returns @ w0)
+        sorted0 = np.sort(losses0)[::-1]
+        cutoff0 = max(int(np.ceil((1 - cvar_alpha) * len(sorted0))), 1)
+        risk_term_baseline = float(np.mean(sorted0[:cutoff0]) * cfg.TRADING_DAYS_PER_YEAR) + cfg.EPSILON
+    elif strategy == "risk_parity":
+        sw0 = cov_matrix @ w0
+        pv0 = float(np.sqrt(w0 @ sw0 + cfg.EPSILON))
+        mrc0 = w0 * sw0 / (pv0 + cfg.EPSILON)
+        crc0 = mrc0 + w0 * el_annual
+        crc0_norm = crc0 / (crc0.sum() + cfg.EPSILON)
+        risk_term_baseline = float(np.sum((crc0_norm - 1.0 / n) ** 2)) + cfg.EPSILON
+    else:
+        risk_term_baseline = 1.0
+
     if strategy == "mean_el":
 
         def objective(z: np.ndarray) -> float:
@@ -735,7 +759,7 @@ def optimize_portfolio_with_amounts_fn(
             income = np.sum(z * risk_adj_return)
             port_vol = np.sqrt(w @ cov_matrix @ w)
             el = np.sum(w * el_annual)
-            return -lambda_return * income + lambda_vol * port_vol + lambda_el * el
+            return -lambda_return * income + lambda_vol * (port_vol / risk_term_baseline) + lambda_el * el
 
     elif strategy == "cvar":
 
@@ -746,9 +770,11 @@ def optimize_portfolio_with_amounts_fn(
             port_losses = -(adjusted_returns @ w)
             sorted_losses = np.sort(port_losses)[::-1]
             cutoff = max(int(np.ceil((1 - cvar_alpha) * len(sorted_losses))), 1)
-            cvar_val = np.mean(sorted_losses[:cutoff]) * np.sqrt(cfg.TRADING_DAYS_PER_YEAR)
+            # Tail mean of daily losses scales linearly with horizon (mean rule),
+            # not with sqrt(T) which applies only to volatility.
+            cvar_val = np.mean(sorted_losses[:cutoff]) * cfg.TRADING_DAYS_PER_YEAR
             el = np.sum(w * el_annual)
-            return -lambda_return * income + lambda_vol * cvar_val + lambda_el * el
+            return -lambda_return * income + lambda_vol * (cvar_val / risk_term_baseline) + lambda_el * el
 
     elif strategy == "risk_parity":
 
@@ -764,7 +790,7 @@ def optimize_portfolio_with_amounts_fn(
             crc_norm = crc / total_crc
             target = 1.0 / n
             diff_sum = float(np.sum((crc_norm - target) ** 2))
-            return -lambda_return * income + lambda_vol * diff_sum
+            return -lambda_return * income + lambda_vol * (diff_sum / risk_term_baseline)
 
     else:
         log.error("Unknown strategy '%s'. Use 'mean_el', 'cvar', or 'risk_parity'.", strategy)
@@ -822,18 +848,26 @@ def optimize_portfolio_with_amounts_fn(
     weights = approved / (total_approved + cfg.EPSILON)
     self.d["optimized_weights"] = pd.Series(weights, index=tickers, name="weight")
 
-    total_income = np.sum(approved * risk_adj_return)
+    # Gross expected income (coupon flow conditional on survival to maturity).
+    # Net income is gross minus annualized expected loss, which avoids the
+    # double-subtraction of EL that would happen if we used risk_adj_return here.
+    gross_income = np.sum(approved * rates * (1.0 - pd_cum))
     total_el = np.sum(approved * pd_cum * lgds * 12.0 / terms)
+    net_income = gross_income - total_el
     port_vol = np.sqrt(weights @ cov_matrix @ weights)
+    # RAROC: return on volatility-based risk capital. Capital proxy = port_vol *
+    # total_approved (one-sigma annualized loss on the approved book).
+    risk_capital = port_vol * total_approved + cfg.EPSILON
 
     metrics = {
         "Budget": budget,
         "Total Approved": total_approved,
         "Budget Utilization (%)": total_approved / budget * 100,
-        "Expected Income": total_income,
+        "Expected Income": gross_income,
         "Expected Loss": total_el,
-        "Net Expected Income": total_income - total_el,
-        "RAROC (%)": (total_income / (total_approved + cfg.EPSILON)) * 100,
+        "Net Expected Income": net_income,
+        "RAROC (%)": net_income / risk_capital * 100,
+        "Net Yield on Approved (%)": net_income / (total_approved + cfg.EPSILON) * 100,
         "Portfolio Volatility (%)": port_vol * 100,
         "Applications": n,
         "Fully Approved": int(np.sum(np.isclose(approved, amounts, rtol=0.01))),
@@ -848,6 +882,50 @@ def optimize_portfolio_with_amounts_fn(
             alloc_display[_col] = alloc_display[_col].round(_dec)
     log.log_dataframe(alloc_display, title="Loan Allocations", level=logging.DEBUG)
     log.log_dataframe(self.d["loan_metrics"], title="Loan Portfolio Metrics", level=logging.DEBUG)
+    # Sanity-check breakdown to verify EL is not double-subtracted and RAROC
+    # uses risk capital (vol-based) rather than nominal exposure.
+    legacy_net_income = float(np.sum(approved * risk_adj_return))
+    legacy_raroc = legacy_net_income / (total_approved + cfg.EPSILON) * 100
+    breakdown_df = pd.DataFrame(
+        [
+            {
+                "Strategy": strategy,
+                "Gross Income": gross_income,
+                "Expected Loss": total_el,
+                "Net Income": net_income,
+                "Port Vol": port_vol,
+                "Risk Capital": risk_capital,
+                "RAROC (%)": net_income / risk_capital * 100,
+                "Net Yield (%)": net_income / (total_approved + cfg.EPSILON) * 100,
+                "Legacy Net (rar)": legacy_net_income,
+                "Legacy RAROC (%)": legacy_raroc,
+                "Util (%)": total_approved / budget * 100,
+            }
+        ]
+    ).round(
+        {
+            "Gross Income": 2,
+            "Expected Loss": 2,
+            "Net Income": 2,
+            "Port Vol": 4,
+            "Risk Capital": 2,
+            "RAROC (%)": 2,
+            "Net Yield (%)": 2,
+            "Legacy Net (rar)": 2,
+            "Legacy RAROC (%)": 2,
+            "Util (%)": 1,
+        }
+    )
+    log.log_dataframe(breakdown_df, title=f"Optimization breakdown [{strategy}]")
+    # Cross-check: net_income should equal legacy_net_income within tolerance
+    # because risk_adj_return = rate*(1-pd_cum) - pd_cum*lgd*12/term by definition.
+    if abs(net_income - legacy_net_income) > max(1.0, abs(net_income) * 1e-6):
+        log.warning(
+            "Net income mismatch: gross-EL=%.4f vs sum(approved*rar)=%.4f (delta=%.4f)",
+            net_income,
+            legacy_net_income,
+            net_income - legacy_net_income,
+        )
     log.debug("Amount-based portfolio optimization completed successfully.")
     return self
 
@@ -926,6 +1004,7 @@ def backtest_portfolio_with_amounts_fn(
 
     results = []
     w_active_actual = None
+    w_passive_actual: Optional[pd.Series] = None  # Fix #3: buy-and-hold passive.
     total_rebalances = 0
     weight_history = []
 
@@ -986,11 +1065,21 @@ def backtest_portfolio_with_amounts_fn(
         w_target = w_target / (w_target.sum() + cfg.EPSILON)
 
         if w_active_actual is None:
+            # Fix #2: do not count the initial allocation as a rebalance.
             w_active_actual = w_target.copy()
-            turnover = w_target.abs().sum()
-            rebalanced = True
-            total_rebalances += 1
+            turnover = 0.0
+            rebalanced = False
         else:
+            # Fix #6: zero weights for expired loans before drift; redistribute
+            # surviving weights so the portfolio stays normalized.
+            expired = [t for t in available_tickers if t not in active_tickers_month]
+            if expired:
+                w_active_actual = w_active_actual.copy()
+                w_active_actual[expired] = 0.0
+                surv = w_active_actual.sum()
+                if surv > 0:
+                    w_active_actual = w_active_actual / surv
+
             rets = monthly_returns.loc[target_date, available_tickers].fillna(0)
             w_drifted = w_active_actual * (1 + rets)
             total_val = w_drifted.sum()
@@ -1009,24 +1098,45 @@ def backtest_portfolio_with_amounts_fn(
 
         tc = transaction_cost * turnover
         pds_t = monthly_pds.loc[target_date, available_tickers].fillna(0)
+        # Fix #4: PD from add_merton_pd is annual (T=1). Convert to monthly EL
+        # so it lives on the same scale as monthly market return + monthly
+        # credit income. EL_month ~ PD_annual / 12 for small PD.
+        lgds_aligned = lgds_map.reindex(available_tickers, fill_value=0.4)
+        rates_active = w_active_actual.reindex(active_tickers_month, fill_value=0) * rates.reindex(
+            active_tickers_month, fill_value=0
+        )
 
         active_return = np.sum(w_active_actual * monthly_returns.loc[target_date, available_tickers]) - tc
-        active_el = np.sum(w_active_actual * pds_t * lgds_map.reindex(available_tickers, fill_value=0.4))
-        active_credit_income = np.sum(
-            w_active_actual.reindex(active_tickers_month, fill_value=0)
-            * rates.reindex(active_tickers_month, fill_value=0)
-            / cfg.MONTHS_PER_YEAR
-        )
+        active_el = float(np.sum(w_active_actual * pds_t * lgds_aligned)) / cfg.MONTHS_PER_YEAR
+        active_credit_income = float(np.sum(rates_active)) / cfg.MONTHS_PER_YEAR
 
-        w_passive = pd.Series(0.0, index=available_tickers)
-        w_passive[active_tickers_month] = 1.0 / n_active
-        passive_return = np.sum(w_passive * monthly_returns.loc[target_date, available_tickers])
-        passive_el = np.sum(w_passive * pds_t * lgds_map.reindex(available_tickers, fill_value=0.4))
-        passive_credit_income = np.sum(
-            w_passive.reindex(active_tickers_month, fill_value=0)
-            * rates.reindex(active_tickers_month, fill_value=0)
-            / cfg.MONTHS_PER_YEAR
+        # Fix #3: buy-and-hold passive. Initialize once across all available
+        # tickers (those with terms remaining at t=0); on each step zero out
+        # newly expired loans and renormalize survivors, then drift via rets.
+        if w_passive_actual is None:
+            w_passive_actual = pd.Series(0.0, index=available_tickers)
+            w_passive_actual[active_tickers_month] = 1.0 / n_active
+        else:
+            expired_p = [t for t in available_tickers if t not in active_tickers_month]
+            if expired_p:
+                w_passive_actual = w_passive_actual.copy()
+                w_passive_actual[expired_p] = 0.0
+                surv_p = w_passive_actual.sum()
+                if surv_p > 0:
+                    w_passive_actual = w_passive_actual / surv_p
+
+        rets_p = monthly_returns.loc[target_date, available_tickers].fillna(0)
+        passive_return = float(np.sum(w_passive_actual * rets_p))
+        passive_el = float(np.sum(w_passive_actual * pds_t * lgds_aligned)) / cfg.MONTHS_PER_YEAR
+        rates_passive = w_passive_actual.reindex(active_tickers_month, fill_value=0) * rates.reindex(
+            active_tickers_month, fill_value=0
         )
+        passive_credit_income = float(np.sum(rates_passive)) / cfg.MONTHS_PER_YEAR
+
+        w_passive_drifted = w_passive_actual * (1.0 + rets_p)
+        total_p = float(w_passive_drifted.sum())
+        if total_p > 0:
+            w_passive_actual = w_passive_drifted / total_p
 
         weight_record = {"date": target_date, "rebalanced": rebalanced}
         for ticker in available_tickers:
@@ -1172,7 +1282,9 @@ def compare_amount_strategies_fn(
                     alloc_display[_col] = alloc_display[_col].round(_dec)
             log.log_dataframe(alloc_display, title=f"[{strat}] Loan Allocations (last period)")
 
-        net_vol = bt["Active_Net"].std() * np.sqrt(cfg.MONTHS_PER_YEAR)
+        net_vol_monthly = bt["Active_Net"].std()
+        net_mean_monthly = bt["Active_Net"].mean()
+        sharpe_net = net_mean_monthly / (net_vol_monthly + cfg.EPSILON) * np.sqrt(cfg.MONTHS_PER_YEAR)
         comparison_rows.append(
             {
                 "Strategy": strat,
@@ -1183,15 +1295,17 @@ def compare_amount_strategies_fn(
                 "Realized Vol (%)": round(bt["Active_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
                 "Total TC (%)": round(bt["TC"].sum() * 100, 4),
                 "Rebalances": int(bt["Rebalanced"].sum()),
-                "RAROC (%)": round(bt["Active_Net"].mean() / (net_vol + cfg.EPSILON) * 100, 4),
+                "Sharpe (Net)": round(sharpe_net, 4),
             }
         )
 
     last_bt = all_backtests[strategies[-1]]
-    passive_net_vol = last_bt["Passive_Net"].std() * np.sqrt(cfg.MONTHS_PER_YEAR)
+    passive_vol_monthly = last_bt["Passive_Net"].std()
+    passive_mean_monthly = last_bt["Passive_Net"].mean()
+    passive_sharpe = passive_mean_monthly / (passive_vol_monthly + cfg.EPSILON) * np.sqrt(cfg.MONTHS_PER_YEAR)
     comparison_rows.append(
         {
-            "Strategy": "passive (equal)",
+            "Strategy": "passive (equal, buy-and-hold)",
             "Total Market Return (%)": round(((1 + last_bt["Passive_Return"]).prod() - 1) * 100, 4),
             "Avg Credit Income (%)": round(last_bt["Passive_Credit_Income"].mean() * 100, 4),
             "Avg Realized EL (%)": round(last_bt["Passive_EL"].mean() * 100, 6),
@@ -1199,7 +1313,7 @@ def compare_amount_strategies_fn(
             "Realized Vol (%)": round(last_bt["Passive_Return"].std() * np.sqrt(cfg.MONTHS_PER_YEAR) * 100, 4),
             "Total TC (%)": 0.0,
             "Rebalances": 0,
-            "RAROC (%)": round(last_bt["Passive_Net"].mean() / (passive_net_vol + cfg.EPSILON) * 100, 4),
+            "Sharpe (Net)": round(passive_sharpe, 4),
         }
     )
 

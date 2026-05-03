@@ -307,3 +307,42 @@ tickers = {
     "ZMZNP": 603,
     "ZVEZ": 82001,
 }
+
+
+# Russian-language company names for tickers used across the project.
+# Used in plots / reports to render human-readable labels instead of MOEX
+# tickers. Extend as new tickers enter the analysis.
+company_names = {
+    "GAZP": "Газпром",
+    "LKOH": "Лукойл",
+    "ROSN": "Роснефть",
+    "SBER": "Сбербанк",
+    "VTBR": "ВТБ",
+    "MOEX": "Московская биржа",
+    "GMKN": "Норникель",
+    "NLMK": "НЛМК",
+    "RUAL": "РУСАЛ",
+    "MTSS": "МТС",
+    "RTKM": "Ростелеком",
+    "TTLK": "Таттелеком",
+    "MGNT": "Магнит",
+    "FESH": "ДВМП (FESCO)",
+    "LENT": "Лента",
+    "LNTA": "Лента",
+    "T": "Т-Банк",
+    "X5": "X5 Retail Group",
+}
+
+
+def get_company_name(ticker: str) -> str:
+    """Returns the Russian company name for the given ticker.
+
+    Falls back to the original ticker when no mapping exists.
+
+    Args:
+        ticker: MOEX ticker symbol.
+
+    Returns:
+        Human-readable company name in Russian, or the ticker itself.
+    """
+    return company_names.get(ticker, ticker)
