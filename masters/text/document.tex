@@ -1249,39 +1249,39 @@
 
 	\begin{figure}[h!]
 		\centering
-		\resizebox{0.75\textwidth}{!}{%
+		\resizebox{\textwidth}{!}{%
 		\begin{tikzpicture}
 			% ---- Data Sources (y=8) ----
 			\node[ext] (moex)    at (-0.4, 8) {MOEX\\Котировки};
 			\node[ext] (rosstat) at (3.55, 8) {Росстат\\Инфляция, Безработица};
 			\node[ext] (cbr)     at (8.0, 8) {ЦБ~РФ\\Ставка, USD/RUB};
-			\node[db]  (backup)  at (11.4, 8) {CSV\\Архив};
+			\node[db]  (backup)  at (11.4, 8) {CSV\\Backup};
 			% ---- ETL Layer (y=6.2) ----
 			\node[server, minimum width=14cm] (etl) at (5.25, 6.0)
-				{\textbf{Загрузка данных}\\
-				 котировки, мультипликаторы, макропоказатели};
+				{\textbf{ETL-блок}\\
+				 \texttt{load\_stock\_data},\ \texttt{load\_multipliers},\ \texttt{load\_macro\_data}};
 			% ---- Feature Engineering (y=4.5) ----
 			\node[server, minimum width=14cm] (feat) at (5.25, 4.5)
 				{\textbf{Предобработка данных}\\
-				 расчёт волатильности, сборка мастер-таблицы};
+				 \texttt{add\_dynamic\_features}\ $\to$\ \texttt{create\_portfolio}};
 			% ---- Model Layer (y=2.8) ----
 			\node[server, minimum width=5.0cm] (merton) at (0.78, 2.5)
-				{\textbf{Модель Мертона}\\оценка $V_A$,\ $\sigma_A$\\$PD_i$,\ $DD_i$};
+				{\texttt{add\_merton\_pd}\\Модель Мертона\\$PD_i$,\ $DD_i$};
 			\node[server, minimum width=5.0cm] (macro)  at (9.45, 2.5)
-				{\textbf{Прогноз $DD$}\\VAR / SARIMAX / Prophet\\$\widehat{DD}_i(t{+}h)$};
+				{\texttt{predict\_dd}\\VAR / SARIMAX / Prophet\\$\widehat{DD}_i(t+h)$};
 			% ---- Optimization (y=1.0) ----
 			\node[server, minimum width=5.0cm] (optim)   at (0.78, 0.2)
-				{\textbf{Оптимизация портфеля}\\SLSQP:\ $\min_w\,\rho(w)$};
+				{\texttt{optimize\_portfolio}\\SLSQP:\ $\min \rho(w)$};
 			\node[server, minimum width=5.0cm] (metrics) at (9.65, 0.2)
-				{\textbf{Метрики портфеля}\\Шарп, CVaR, MDD};
+				{\texttt{calc\_portfolio\_metrics}\\Sharpe,\ CVaR,\ MDD};
 			% ---- Backtesting (y=-0.5) ----
 			\node[server, minimum width=9cm] (backtest) at (5.25, -1.5)
-				{\textbf{Бэктестинг стратегий}:\  скользящее окно};
+				{\texttt{backtest\_portfolio\_strategies}:\ walk-forward};
 			% ---- Output (y=-2.2) ----
 			\node[server, minimum width=4.0cm] (plots) at (2.5, -4.2)
-				{\textbf{Визуализация}\\графики, отчёты};
+				{\texttt{plots.py}\\Визуализация};
 			\node[db] (logs) at (8.5, -4.2)
-				{Логи и\\графики};
+				{\texttt{app.log}\\logs/graphs};
 			% ---- Arrows ----
 			\draw[arr] (moex.south)    -- (etl.north);
 			\draw[arr] (rosstat.south) -- (etl.north);
