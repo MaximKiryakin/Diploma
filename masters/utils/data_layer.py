@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 from scipy.stats import norm
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from utils.load_data import (
     get_cbr_inflation_data,

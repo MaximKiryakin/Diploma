@@ -9,7 +9,7 @@ from typing import List, Optional
 import utils.config as cfg
 from utils.logger import Logger
 import os
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from pycbrf.toolbox import ExchangeRates
 import pickle
 
