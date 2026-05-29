@@ -5,3 +5,5 @@ text/Отзыв_Шаблон.docx
 build_latex/
 spark_advanced/
 ~$*
+text/sources/*
+text/other_documents/*
